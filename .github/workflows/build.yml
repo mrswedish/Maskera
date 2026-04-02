@@ -78,3 +78,14 @@ jobs:
         with:
           name: Maskera-Windows-Portable
           path: Maskera-portable.exe
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          tag_name: latest
+          name: "Maskera - Latest Build"
+          body: "Här är den senaste portabla versionen av Maskera. Ingen installation krävs, det är bara att ladda ner och köra Maskera-portable.exe."
+          files: Maskera-portable.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
