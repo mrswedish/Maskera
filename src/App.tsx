@@ -26,7 +26,7 @@ export default function App() {
   const [engineReady, setEngineReady] = useState(false);
   const [engineStatus, setEngineStatus] = useState("Startar AI-Motor...");
   const [matches, setMatches] = useState<Match[]>([]);
-  const [entities, setEntities] = useState<string[]>(["Person", "Organization", "Location"]);
+  const [entities, setEntities] = useState<string[]>(["Person", "Organisation", "Plats"]);
 
   useEffect(() => {
     const startEngine = async () => {

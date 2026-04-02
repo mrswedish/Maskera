@@ -28,7 +28,7 @@ async def load_model():
         print("Laddar AI-modellen... Detta kan ta en stund på en ny maskin.", flush=True)
         loop = asyncio.get_running_loop()
         try:
-            model = await loop.run_in_executor(None, GLiNER.from_pretrained, "knowledgator/gliner-pii-small-v1.0")
+            model = await loop.run_in_executor(None, GLiNER.from_pretrained, "urchade/gliner_multi-v2.1")
             print("AI-modellen är laddad och redo!", flush=True)
         except Exception as e:
             print(f"Fel vid nerladdning av AI: {e}", flush=True)
