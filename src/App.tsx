@@ -50,8 +50,8 @@ export default function App() {
         
       } catch (e) {
         console.error("Sidecar boot error: ", e);
-        setEngineStatus("Fel: Kunde inte starta motorn.");
-        setEngineReady(true);
+        // Only set this if it's not a real crash, or just say it failed
+        setEngineStatus("Kritisk motor-krasch. Testa att dubbelklicka på motor-exe:n manuellt!");
       }
     };
     startEngine();
