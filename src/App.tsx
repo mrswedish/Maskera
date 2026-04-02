@@ -30,6 +30,17 @@ export default function App() {
 
   useEffect(() => {
     const startEngine = async () => {
+      // 1. Testa ifall motorn _redan_ är igång (t.ex. startad manuellt av användaren)
+      try {
+        const res = await fetch("http://127.0.0.1:8594/analyze", { method: "OPTIONS" }).catch(() => null);
+        if (res || await fetch("http://127.0.0.1:8594/docs").then(() => true).catch(() => false)) {
+          setEngineReady(true);
+          setEngineStatus("Motorn är redan igång och ansluten!");
+          return;
+        }
+      } catch(e) {}
+
+      // 2. Om inte, försök starta den via Tauri
       try {
         const { Command } = await import('@tauri-apps/plugin-shell');
         const cmd = Command.sidecar('bin/masking_engine');
@@ -50,8 +61,7 @@ export default function App() {
         
       } catch (e) {
         console.error("Sidecar boot error: ", e);
-        // Only set this if it's not a real crash, or just say it failed
-        setEngineStatus("Kritisk motor-krasch. Testa att dubbelklicka på motor-exe:n manuellt!");
+        setEngineStatus("Kunde inte autostarta. Lösning: Dubbelklicka på motor-exe:n manuellt!");
       }
     };
     startEngine();
