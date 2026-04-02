@@ -66,7 +66,7 @@ def find_regex_matches(text: str) -> List[Match]:
         
     phone_pattern = r'(?:(?:0|\+46|0046)\s?(?:[1-9]\d{1,2}\s?(?:[- ]?\d{2,3}){1,3}|\d{2,3}\s?(?:[- ]?\d{2,3}){1,3}))'
     for m in re.finditer(phone_pattern, text):
-        matches.append(Match(text=m.group().strip(), label="Telefonnummer", start=m.start(), end=m.start() + len(m.group().strip()), source="regex"))
+        matches.append(Match(text=m.group().strip(), label="Telefonnummer", start=m.start(), end=m.end() - (len(m.group()) - len(m.group().strip())), source="regex"))
 
     return matches
 
