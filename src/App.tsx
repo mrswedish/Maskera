@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Upload, Shield, Download, FileText, CheckCircle2 } from "lucide-react";
 import "./index.css";
 
@@ -23,8 +23,28 @@ export default function App() {
   const [fileContent, setFileContent] = useState<string>("");
   const [fileName, setFileName] = useState<string>("");
   const [analyzing, setAnalyzing] = useState(false);
+  const [engineReady, setEngineReady] = useState(false);
   const [matches, setMatches] = useState<Match[]>([]);
   const [entities, setEntities] = useState<string[]>(["Person", "Organization", "Location"]);
+
+  useEffect(() => {
+    const startEngine = async () => {
+      try {
+        const { Command } = await import('@tauri-apps/plugin-shell');
+        // We use "bin/masking_engine" as defined in tauri.conf.json
+        const cmd = Command.sidecar('bin/masking_engine');
+        await cmd.spawn();
+        
+        // Wait a small delay to ensure FastAPI has booted
+        setTimeout(() => setEngineReady(true), 5000); 
+      } catch (e) {
+        console.error("Sidecar boot error: ", e);
+        // Fallback to true in case it's in dev mode without sidecar
+        setEngineReady(true);
+      }
+    };
+    startEngine();
+  }, []);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -153,10 +173,10 @@ export default function App() {
 
           <button
             onClick={handleAnalyze}
-            disabled={!fileContent || analyzing}
+            disabled={!fileContent || analyzing || !engineReady}
             className="btn-primary"
           >
-            {analyzing ? "Skannar text..." : "Granska Text"}
+            {!engineReady ? "Startar AI-Motor..." : analyzing ? "Skannar text..." : "Granska Text"}
           </button>
         </div>
 

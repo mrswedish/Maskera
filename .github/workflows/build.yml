@@ -1,0 +1,80 @@
+name: Build Maskera
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Enable Long Paths
+        run: |
+          git config --system core.longpaths true
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -Force
+
+      - name: Setup Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+          
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install fastapi uvicorn pydantic gliner pyinstaller
+
+      - name: Build Python Sidecar
+        run: |
+          pyinstaller --onefile masking_engine.py --name masking_engine-x86_64-pc-windows-msvc
+          mkdir -p src-tauri/bin
+          cp dist/masking_engine-x86_64-pc-windows-msvc.exe src-tauri/bin/
+
+      - name: Install Frontend Dependencies
+        run: npm install
+
+      - name: Build Tauri App
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: --target x86_64-pc-windows-msvc
+
+      - name: Extract Portable Executable
+        run: |
+          $targetPath = "src-tauri/target/x86_64-pc-windows-msvc/release"
+          $exePaths = @("$targetPath/maskera.exe", "src-tauri/target/release/maskera.exe")
+          
+          $found = $false
+          foreach ($p in $exePaths) {
+            if (Test-Path $p) {
+              Copy-Item -Path $p -Destination "Maskera-portable.exe"
+              $found = $true
+              break
+            }
+          }
+          
+          if (-not $found) {
+            Write-Error "Could not find the tauri executable."
+          }
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: Maskera-Windows-Portable
+          path: Maskera-portable.exe

@@ -12,9 +12,9 @@
   "app": {
     "windows": [
       {
-        "title": "maskera",
-        "width": 800,
-        "height": 600
+        "title": "Maskera",
+        "width": 1000,
+        "height": 700
       }
     ],
     "security": {
@@ -30,6 +30,7 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "externalBin": ["bin/masking_engine"]
   }
 }
