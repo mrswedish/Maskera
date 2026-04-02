@@ -24,6 +24,7 @@ export default function App() {
   const [fileName, setFileName] = useState<string>("");
   const [analyzing, setAnalyzing] = useState(false);
   const [engineReady, setEngineReady] = useState(false);
+  const [engineStatus, setEngineStatus] = useState("Startar AI-Motor...");
   const [matches, setMatches] = useState<Match[]>([]);
   const [entities, setEntities] = useState<string[]>(["Person", "Organization", "Location"]);
 
@@ -31,15 +32,25 @@ export default function App() {
     const startEngine = async () => {
       try {
         const { Command } = await import('@tauri-apps/plugin-shell');
-        // We use "bin/masking_engine" as defined in tauri.conf.json
         const cmd = Command.sidecar('bin/masking_engine');
+        
+        cmd.stdout.on('data', line => {
+          console.log(`engine: ${line}`);
+          setEngineStatus(line);
+          if (line.includes("redo")) {
+             setEngineReady(true);
+          }
+        });
+        
+        cmd.stderr.on('data', line => {
+          console.error(`engine error: ${line}`);
+        });
+
         await cmd.spawn();
         
-        // Wait a small delay to ensure FastAPI has booted
-        setTimeout(() => setEngineReady(true), 5000); 
       } catch (e) {
         console.error("Sidecar boot error: ", e);
-        // Fallback to true in case it's in dev mode without sidecar
+        setEngineStatus("Fel: Kunde inte starta motorn.");
         setEngineReady(true);
       }
     };
@@ -178,6 +189,7 @@ export default function App() {
           >
             {!engineReady ? "Startar AI-Motor..." : analyzing ? "Skannar text..." : "Granska Text"}
           </button>
+          {!engineReady && <p style={{fontSize: '0.8rem', color: '#f59e0b', textAlign: 'center', marginTop: '-0.5rem'}}>{engineStatus}</p>}
         </div>
 
         <div className="panel relative">
