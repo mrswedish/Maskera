@@ -91,16 +91,52 @@ def analyze_text(req: AnalyzeRequest):
     kb_matches = []
     
     if requested_ner_tags:
-        try:
-            predictions = model(req.text)
-            for p in predictions:
-                entity_group = p.get("entity_group")
-                if entity_group in requested_ner_tags:
-                    # Clean up word (pipeline sometimes returns ##word subwords)
-                    word = str(p.get("word", "")).replace("##", "")
-                    kb_matches.append(Match(text=word, label=ner_to_ui[entity_group], start=p["start"], end=p["end"], source="kblab"))
-        except Exception as e:
-            print(f"Error running model: {e}", flush=True)
+        # Säkerhetsmekanism: Dela upp extremt långa texter i mindre bitar 
+        # (BERT klarar max 512 tokens åt gången, ca 1500-2000 tecken beroende på ordlängd)
+        max_chars = 1500
+        chunks = []
+        chunk_starts = []
+        current_start = 0
+        
+        while current_start < len(req.text):
+            end = current_start + max_chars
+            if end >= len(req.text):
+                end = len(req.text)
+            else:
+                # Försök bryta vid en punkt eller mellanslag så att vi inte klipper ord
+                cut_idx = req.text.rfind('. ', current_start, end)
+                if cut_idx == -1:
+                    cut_idx = req.text.rfind(' ', current_start, end)
+                
+                if cut_idx != -1 and cut_idx > current_start:
+                    end = cut_idx + 1 # Klipp precis efter punkten/mellanslaget
+                    
+            chunks.append(req.text[current_start:end])
+            chunk_starts.append(current_start)
+            current_start = end
+
+        for i, chunk in enumerate(chunks):
+            if not chunk.strip():
+                continue
+            try:
+                predictions = model(chunk)
+                for p in predictions:
+                    entity_group = p.get("entity_group")
+                    if entity_group in requested_ner_tags:
+                        word = str(p.get("word", "")).replace("##", "")
+                        # Returnerade indices är relativa till Chunken, addera chunkens start position
+                        global_start = chunk_starts[i] + p["start"]
+                        global_end = chunk_starts[i] + p["end"]
+                        
+                        kb_matches.append(Match(
+                            text=word, 
+                            label=ner_to_ui[entity_group], 
+                            start=global_start, 
+                            end=global_end, 
+                            source="kblab"
+                        ))
+            except Exception as e:
+                print(f"Fel vid körning av modell på chunk {i}: {e}", flush=True)
             
     all_matches = regex_matches + kb_matches
     all_matches.sort(key=lambda x: x.start)
