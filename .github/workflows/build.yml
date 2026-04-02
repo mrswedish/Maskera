@@ -59,7 +59,7 @@ jobs:
         with:
           args: --target x86_64-pc-windows-msvc
 
-      - name: Create Portable Zip
+      - name: Extract Binaries for Release
         run: |
           $targetPath = "src-tauri/target/x86_64-pc-windows-msvc/release"
           if (-not (Test-Path $targetPath/maskera.exe)) {
@@ -67,16 +67,11 @@ jobs:
           }
           
           if (Test-Path "$targetPath/maskera.exe") {
-             Compress-Archive -Path "$targetPath/maskera.exe", "$targetPath/masking_engine-*.exe" -DestinationPath "Maskera-Portable.zip" -Force
+             Copy-Item -Path "$targetPath/maskera.exe" -Destination "Maskera-Dashboard.exe"
+             Copy-Item -Path "$targetPath/masking_engine-x86_64-pc-windows-msvc.exe" -Destination "masking_engine-x86_64-pc-windows-msvc.exe"
           } else {
              Write-Error "Could not find the tauri executable."
           }
-
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Maskera-Windows-Portable
-          path: Maskera-Portable.zip
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -84,7 +79,9 @@ jobs:
         with:
           tag_name: latest
           name: "Maskera - Latest Build"
-          body: "Här är den senaste versionen av Maskera. Ladda ner zip-filen, packa upp den i en mapp (exempelvis på ditt USB-minne) och klicka på maskera.exe för att starta applikationen."
-          files: Maskera-Portable.zip
+          body: "Här är den senaste portabla versionen. Ladda ner TILL SAMMA MAPP:\n1. Maskera-Dashboard.exe\n2. masking_engine-x86_64-pc-windows-msvc.exe\n\nDöp INTE om backend-filen! Dubbelklicka sedan på Maskera-Dashboard.exe"
+          files: |
+            Maskera-Dashboard.exe
+            masking_engine-x86_64-pc-windows-msvc.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
