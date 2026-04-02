@@ -68,7 +68,7 @@ jobs:
           
           if (Test-Path "$targetPath/maskera.exe") {
              Copy-Item -Path "$targetPath/maskera.exe" -Destination "Maskera-Dashboard.exe"
-             Copy-Item -Path "$targetPath/masking_engine-x86_64-pc-windows-msvc.exe" -Destination "masking_engine-x86_64-pc-windows-msvc.exe"
+             Copy-Item -Path "src-tauri/bin/masking_engine-x86_64-pc-windows-msvc.exe" -Destination "masking_engine-x86_64-pc-windows-msvc.exe"
           } else {
              Write-Error "Could not find the tauri executable."
           }
