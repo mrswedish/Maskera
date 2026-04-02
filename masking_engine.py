@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from typing import List
 import uvicorn
 import asyncio
-from gliner import GLiNER
+from transformers import pipeline
 
 app = FastAPI()
 
@@ -21,14 +21,17 @@ app.add_middleware(
 model = None
 model_loading = False
 
+def init_pipeline():
+    return pipeline("ner", model="KBLab/bert-base-swedish-cased-ner", aggregation_strategy="simple")
+
 async def load_model():
     global model, model_loading
     if model is None and not model_loading:
         model_loading = True
-        print("Laddar AI-modellen... Detta kan ta en stund på en ny maskin.", flush=True)
+        print("Laddar KBLab Svensk-motor... Detta kan ta en stund på en ny maskin.", flush=True)
         loop = asyncio.get_running_loop()
         try:
-            model = await loop.run_in_executor(None, GLiNER.from_pretrained, "urchade/gliner_multi-v2.1")
+            model = await loop.run_in_executor(None, init_pipeline)
             print("AI-modellen är laddad och redo!", flush=True)
         except Exception as e:
             print(f"Fel vid nerladdning av AI: {e}", flush=True)
@@ -74,18 +77,32 @@ def analyze_text(req: AnalyzeRequest):
         raise HTTPException(status_code=503, detail="AI-modellen laddas fortfarande ner, vänligen vänta...")
 
     regex_matches = find_regex_matches(req.text)
-    labels = req.entities
-    gliner_matches = []
     
-    if labels:
+    ui_to_ner = {
+        "Person": "PER",
+        "Organisation": "ORG",
+        "Plats": "LOC",
+        "Övrigt": "MISC"
+    }
+    ner_to_ui = {v: k for k, v in ui_to_ner.items()}
+    
+    requested_ner_tags = [ui_to_ner[e] for e in req.entities if e in ui_to_ner]
+    
+    kb_matches = []
+    
+    if requested_ner_tags:
         try:
-            predictions = model.predict_entities(req.text, labels, threshold=0.4)
+            predictions = model(req.text)
             for p in predictions:
-                gliner_matches.append(Match(text=p["text"], label=p["label"], start=p["start"], end=p["end"], source="gliner"))
+                entity_group = p.get("entity_group")
+                if entity_group in requested_ner_tags:
+                    # Clean up word (pipeline sometimes returns ##word subwords)
+                    word = str(p.get("word", "")).replace("##", "")
+                    kb_matches.append(Match(text=word, label=ner_to_ui[entity_group], start=p["start"], end=p["end"], source="kblab"))
         except Exception as e:
             print(f"Error running model: {e}", flush=True)
             
-    all_matches = regex_matches + gliner_matches
+    all_matches = regex_matches + kb_matches
     all_matches.sort(key=lambda x: x.start)
     
     filtered = []
