@@ -133,7 +133,7 @@ def analyze_text(req: AnalyzeRequest):
                 for p in predictions:
                     entity_group = p.get("entity_group")
                     if entity_group in requested_ner_tags:
-                        word = str(p.get("word", "")).replace("##", "")
+                        word = chunk[p["start"]:p["end"]]
                         global_start = chunk_starts[i] + p["start"]
                         global_end = chunk_starts[i] + p["end"]
                         kb_matches.append(Match(
