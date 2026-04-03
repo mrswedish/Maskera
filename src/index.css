@@ -24,10 +24,13 @@ body {
 }
 
 .app-container {
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
   padding: 2rem;
   max-width: 1200px;
   margin: 0 auto;
+  display: flex;
+  flex-direction: column;
 }
 
 .header {
@@ -51,11 +54,15 @@ body {
   display: grid;
   grid-template-columns: 1fr;
   gap: 2rem;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 @media(min-width: 768px) {
   .dashboard {
     grid-template-columns: 1fr 2fr;
+    align-items: start;
   }
 }
 
@@ -68,6 +75,13 @@ body {
   flex-direction: column;
   gap: 1.5rem;
   box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+  overflow-y: auto;
+  max-height: 100%;
+}
+
+.panel-fill {
+  height: 100%;
+  overflow: hidden;
 }
 
 .panel-title {
@@ -180,8 +194,8 @@ body {
   border: 1px solid var(--border-color);
   border-radius: 0.75rem;
   padding: 1rem;
-  min-height: 250px;
-  max-height: 60vh;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   font-family: 'Consolas', 'Monaco', monospace;
   font-size: 0.9rem;

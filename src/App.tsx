@@ -316,7 +316,7 @@ export default function App() {
         </div>
 
         {/* Textvisare */}
-        <div className="panel">
+        <div className="panel panel-fill">
           <h2 className="panel-title" style={{ marginBottom: "1rem" }}>Granskning</h2>
           {matches.length > 0 && (
             <p className="review-hint">
