@@ -39,7 +39,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install fastapi uvicorn pydantic transformers torch pyinstaller
-          pyinstaller --onefile masking_engine.py --name Maskera --add-data "dist;dist"
+          pyinstaller --onefile masking_engine.py --name Maskera --add-data "dist;dist" --icon src-tauri/icons/icon.ico
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
