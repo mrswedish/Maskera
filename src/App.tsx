@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useMemo } from "react";
 import { Upload, Shield, Download, FileText, CheckCircle2, Table } from "lucide-react";
 import "./index.css";
 import type { Match, TranslationTable } from "./types";
@@ -18,51 +18,10 @@ export default function App() {
   const [fileContent, setFileContent] = useState<string>("");
   const [fileName, setFileName] = useState<string>("");
   const [analyzing, setAnalyzing] = useState(false);
-  const [engineReady, setEngineReady] = useState(false);
-  const [engineStatus, setEngineStatus] = useState("Startar AI-Motor...");
   const [matches, setMatches] = useState<Match[]>([]);
   const [entities, setEntities] = useState<string[]>(["Person", "Organisation", "Plats", "Övrigt"]);
   const [translationTable, setTranslationTable] = useState<TranslationTable>(new Map());
   const [showTranslationTable, setShowTranslationTable] = useState(false);
-
-  useEffect(() => {
-    const startEngine = async () => {
-      // 1. Testa ifall motorn _redan_ är igång (t.ex. startad manuellt av användaren)
-      try {
-        const res = await fetch("http://127.0.0.1:8594/analyze", { method: "OPTIONS" }).catch(() => null);
-        if (res || await fetch("http://127.0.0.1:8594/docs").then(() => true).catch(() => false)) {
-          setEngineReady(true);
-          setEngineStatus("Motorn är redan igång och ansluten!");
-          return;
-        }
-      } catch(e) {}
-
-      // 2. Om inte, försök starta den via Tauri
-      try {
-        const { Command } = await import('@tauri-apps/plugin-shell');
-        const cmd = Command.sidecar('bin/masking_engine');
-
-        cmd.stdout.on('data', line => {
-          console.log(`engine: ${line}`);
-          setEngineStatus(line);
-          if (line.includes("redo")) {
-            setEngineReady(true);
-          }
-        });
-
-        cmd.stderr.on('data', line => {
-          console.error(`engine error: ${line}`);
-        });
-
-        await cmd.spawn();
-
-      } catch (e) {
-        console.error("Sidecar boot error: ", e);
-        setEngineStatus("Kunde inte autostarta. Lösning: Dubbelklicka på motor-exe:n manuellt!");
-      }
-    };
-    startEngine();
-  }, []);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -238,12 +197,11 @@ export default function App() {
 
           <button
             onClick={handleAnalyze}
-            disabled={!fileContent || analyzing || !engineReady}
+            disabled={!fileContent || analyzing}
             className="btn-primary"
           >
-            {!engineReady ? "Startar AI-Motor..." : analyzing ? "Skannar text..." : "Granska Text"}
+            {analyzing ? "Skannar text..." : "Granska Text"}
           </button>
-          {!engineReady && <p style={{fontSize: '0.8rem', color: '#f59e0b', textAlign: 'center', marginTop: '-0.5rem'}}>{engineStatus}</p>}
         </div>
 
         <div className="panel relative">

@@ -9,11 +9,10 @@ on:
 permissions:
   contents: write
 
-
 jobs:
   build-windows:
     runs-on: windows-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -27,51 +26,20 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install Python Dependencies
+      - name: Build Frontend
+        run: npm install && npm run build
+
+      - name: Install Python Dependencies and Build Executable
         run: |
           python -m pip install --upgrade pip
           pip install fastapi uvicorn pydantic transformers torch pyinstaller
-
-      - name: Build Python Sidecar
-        run: |
-          pyinstaller --onefile masking_engine.py --name masking_engine-x86_64-pc-windows-msvc
-          mkdir -p src-tauri/bin
-          cp dist/masking_engine-x86_64-pc-windows-msvc.exe src-tauri/bin/
-
-      - name: Install Frontend Dependencies
-        run: npm install
-
-      - name: Build Tauri App
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          args: --target x86_64-pc-windows-msvc
-
-      - name: Extract Binaries for Release
-        run: |
-          $targetPath = "src-tauri/target/x86_64-pc-windows-msvc/release"
-          if (-not (Test-Path $targetPath/maskera.exe)) {
-             $targetPath = "src-tauri/target/release"
-          }
-          
-          if (Test-Path "$targetPath/maskera.exe") {
-             Copy-Item -Path "$targetPath/maskera.exe" -Destination "Maskera-Dashboard.exe"
-             Copy-Item -Path "src-tauri/bin/masking_engine-x86_64-pc-windows-msvc.exe" -Destination "masking_engine-x86_64-pc-windows-msvc.exe"
-          } else {
-             Write-Error "Could not find the tauri executable."
-          }
+          pyinstaller --onefile masking_engine.py --name Maskera --add-data "dist;dist"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -79,9 +47,7 @@ jobs:
         with:
           tag_name: latest
           name: "Maskera - Latest Build"
-          body: "Här är den senaste portabla versionen. Ladda ner TILL SAMMA MAPP:\n1. Maskera-Dashboard.exe\n2. masking_engine-x86_64-pc-windows-msvc.exe\n\nDöp INTE om backend-filen! Dubbelklicka sedan på Maskera-Dashboard.exe"
-          files: |
-            Maskera-Dashboard.exe
-            masking_engine-x86_64-pc-windows-msvc.exe
+          body: "Ladda ner Maskera.exe och kör den. Din webbläsare öppnas automatiskt. Första gången laddas AI-modellen ner (~500 MB)."
+          files: dist/Maskera.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
