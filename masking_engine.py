@@ -5,6 +5,7 @@ import threading
 import webbrowser
 import asyncio
 import multiprocessing
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -13,16 +14,6 @@ from pydantic import BaseModel
 from typing import List
 import uvicorn
 from transformers import pipeline
-
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # Hitta dist/ oavsett om vi kör från PyInstaller-binär eller källkod
 if getattr(sys, 'frozen', False):
@@ -52,10 +43,21 @@ async def load_model():
         finally:
             model_loading = False
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     print("API server startad. Initierar AI...", flush=True)
     asyncio.create_task(load_model())
+    yield
+
+app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class AnalyzeRequest(BaseModel):
     text: str

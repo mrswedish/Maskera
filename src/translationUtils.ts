@@ -3,7 +3,7 @@ import type { Match, TranslationEntry, TranslationTable } from "./types";
 // NER-entiteter (kblab) får bokstavssuffix: "Person A", "Person B"…
 // Regex-entiteter får numeriskt suffix: "Personnummer 1", "E-post 2"…
 function maskedLabel(label: string, source: string, counter: number): string {
-  if (source === "regex") {
+  if (source === "regex" || source === "manuell") {
     return `${label} ${counter}`;
   }
   // Bokstav A–Z, sedan AA, AB… (upp till 702 unika värden)

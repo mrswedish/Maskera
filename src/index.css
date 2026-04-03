@@ -194,6 +194,21 @@ body {
   border-radius: 0.25rem;
   font-weight: 600;
   color: white;
+  cursor: pointer;
+  transition: opacity 0.15s ease, box-shadow 0.15s ease;
+}
+
+.highlighted-entity:hover {
+  box-shadow: 0 0 0 2px rgba(255,255,255,0.4);
+}
+
+.highlighted-entity.ignored {
+  color: var(--text-secondary);
+  text-decoration: line-through;
+  opacity: 0.45;
+  border: 1px dashed #475569;
+  background-color: transparent !important;
+  font-weight: 400;
 }
 
 .entity-label {
@@ -296,4 +311,92 @@ body {
   background-color: rgba(148, 163, 184, 0.15);
   color: var(--text-primary);
   border-color: #475569;
+}
+
+/* Manuellt tillägg */
+.manual-add {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.manual-input {
+  background-color: #0f172a;
+  border: 1px solid var(--border-color);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+  outline: none;
+  transition: border-color 0.2s ease;
+}
+
+.manual-input:focus {
+  border-color: var(--accent-color);
+}
+
+.manual-input::placeholder {
+  color: var(--text-secondary);
+}
+
+.manual-select {
+  background-color: #0f172a;
+  border: 1px solid var(--border-color);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.2s ease;
+}
+
+.manual-select:focus {
+  border-color: var(--accent-color);
+}
+
+.btn-add {
+  background-color: rgba(99, 102, 241, 0.12);
+  color: var(--accent-color);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: 0.5rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-add:hover:not(:disabled) {
+  background-color: rgba(99, 102, 241, 0.22);
+}
+
+.btn-add:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Ignorera-knapp i tabellen */
+.btn-ignore-all {
+  background: none;
+  border: none;
+  color: #475569;
+  cursor: pointer;
+  padding: 0.2rem;
+  border-radius: 0.25rem;
+  display: flex;
+  align-items: center;
+  transition: color 0.2s ease;
+}
+
+.btn-ignore-all:hover {
+  color: var(--danger);
+}
+
+/* Hjälptext i granskning */
+.review-hint {
+  font-size: 0.75rem;
+  color: #475569;
+  margin: 0 0 0.5rem 0;
+  font-style: italic;
 }
