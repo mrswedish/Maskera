@@ -4,6 +4,7 @@ import re
 import threading
 import webbrowser
 import asyncio
+import multiprocessing
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -55,7 +56,6 @@ async def load_model():
 async def startup_event():
     print("API server startad. Initierar AI...", flush=True)
     asyncio.create_task(load_model())
-    threading.Timer(1.5, lambda: webbrowser.open("http://127.0.0.1:8594")).start()
 
 class AnalyzeRequest(BaseModel):
     text: str
@@ -167,6 +167,7 @@ if os.path.isdir(DIST_DIR):
         return FileResponse(os.path.join(DIST_DIR, "index.html"))
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     port = 8594
     if len(sys.argv) > 1:
         try:
@@ -174,4 +175,5 @@ if __name__ == "__main__":
         except ValueError:
             pass
     print(f"Startar uvicorn på {port}", flush=True)
+    threading.Timer(1.5, lambda: webbrowser.open(f"http://127.0.0.1:{port}")).start()
     uvicorn.run(app, host="127.0.0.1", port=port)
