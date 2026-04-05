@@ -28,17 +28,35 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
+      - name: Delete existing latest release
+        run: gh release delete latest --yes --cleanup-tag
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         with:
           tagName: latest
           releaseName: "Maskera - Latest Build"
           releaseBody: |
-            ## Installation
-            Ladda ner och kör `Maskera_x.x.x_x64-setup.exe`.
+            ## Nedladdning
 
-            AI-modellen (~500 MB) laddas ner automatiskt första gången appen används och cachas lokalt.
+            | Fil | Beskrivning |
+            |---|---|
+            | `Maskera-portabel.exe` | **Portabel** — kör direkt, ingen installation |
+            | `Maskera_x.x.x_x64-setup.exe` | Installer — installerar i Start-menyn |
+
+            > AI-modellen (~120 MB) laddas ner automatiskt första gången och cachas lokalt.
+            > Kräver Windows 10/11 med WebView2 (ingår i alla moderna Windows-installationer).
           releaseDraft: false
           prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload portable EXE
+        run: |
+          Copy-Item "src-tauri/target/release/maskera.exe" "Maskera-portabel.exe"
+          gh release upload latest "Maskera-portabel.exe" --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
