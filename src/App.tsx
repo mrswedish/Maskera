@@ -4,7 +4,8 @@ import "./index.css";
 import type { Match } from "./types";
 import { buildTranslationTable } from "./translationUtils";
 
-const ENTITY_LABELS = ["Person", "Organisation", "Plats", "Övrigt"] as const;
+const ENTITY_LABELS = ["Person", "Organisation", "Plats", "Övrigt", "Tid", "Händelse"] as const;
+const DEFAULT_ENTITIES = ["Person", "Organisation", "Plats", "Övrigt"];
 
 const COLORS: Record<string, string> = {
   Personnummer: "#ef4444",
@@ -14,6 +15,8 @@ const COLORS: Record<string, string> = {
   Organisation: "#10b981",
   Plats: "#ec4899",
   Övrigt: "#94a3b8",
+  Tid: "#06b6d4",
+  Händelse: "#eab308",
   Manuell: "#f97316",
 };
 
@@ -36,7 +39,7 @@ export default function App() {
   const [analyzing, setAnalyzing] = useState(false);
   const [matches, setMatches] = useState<Match[]>([]);
   const [ignoredKeys, setIgnoredKeys] = useState<Set<string>>(new Set());
-  const [entities, setEntities] = useState<string[]>([...ENTITY_LABELS]);
+  const [entities, setEntities] = useState<string[]>(DEFAULT_ENTITIES);
   const [showTranslationTable, setShowTranslationTable] = useState(false);
   const [engineReady, setEngineReady] = useState(false);
   const [loadProgress, setLoadProgress] = useState(0);
@@ -45,6 +48,10 @@ export default function App() {
   useEffect(() => {
     const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
     workerRef.current = worker;
+    worker.onerror = (e) => {
+      console.error("Worker kraschade:", e);
+      alert("AI-motorn kraschade: " + e.message);
+    };
     worker.onmessage = (e) => {
       const { type, payload } = e.data;
       if (type === "ready") {

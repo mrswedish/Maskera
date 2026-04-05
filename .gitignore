@@ -23,3 +23,15 @@ dist-ssr
 *.sln
 *.sw?
 venv/
+
+# PyInstaller artifacts
+build/
+*.spec
+
+# ONNX export dirs
+onnx_output/
+onnx_v2/
+icon_source.png
+
+# Tauri sidecar binaries
+src-tauri/bin/

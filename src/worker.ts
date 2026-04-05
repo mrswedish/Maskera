@@ -5,14 +5,24 @@ env.allowLocalModels = false;
 
 const MODEL_ID = "psvensk/bert-base-swedish-cased-ner-onnx";
 
+// Hanterar både aggregerade (PER, ORG) och råa B-/I-prefixade taggar (B-PRS, I-LOC)
 const NER_TO_UI: Record<string, string> = {
-  PER: "Person",
+  PER: "Person",  PRS: "Person",
   ORG: "Organisation",
   LOC: "Plats",
   MISC: "Övrigt",
+  TME: "Tid",
+  EVN: "Händelse",
+  MSR: "Övrigt",
 };
 
-let ner: Awaited<ReturnType<typeof pipeline>> | null = null;
+function normalizeTag(raw: string): string {
+  // "B-PRS" → "PRS", "I-ORG" → "ORG", "PER" → "PER"
+  return raw.replace(/^[BI]-/, "");
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let ner: any = null;
 
 // ── Regex ────────────────────────────────────────────────────────────────────
 
@@ -77,16 +87,69 @@ function deduplicateMatches(matches: Match[]): Match[] {
   return result;
 }
 
+// ── Manuell aggregering (Transformers.js saknar aggregation_strategy) ────────
+
+interface RawPrediction { entity: string; score: number; index: number; word: string; }
+interface AggregatedEntity { rawTag: string; text: string; start: number; end: number; }
+
+function aggregatePredictions(preds: RawPrediction[], chunk: string): AggregatedEntity[] {
+  const sorted = [...preds].sort((a, b) => a.index - b.index);
+  const entities: AggregatedEntity[] = [];
+  let current: { rawTag: string; start: number; end: number } | null = null;
+  let searchPos = 0;
+
+  const flush = () => {
+    if (current) {
+      entities.push({ rawTag: current.rawTag, text: chunk.slice(current.start, current.end), start: current.start, end: current.end });
+      current = null;
+    }
+  };
+
+  for (const p of sorted) {
+    const tag = normalizeTag(p.entity);
+    const word = p.word as string;
+
+    if (!NER_TO_UI[tag]) {
+      flush();
+      if (!word.startsWith("##")) {
+        const idx = chunk.indexOf(word, searchPos);
+        if (idx !== -1) searchPos = idx + word.length;
+      }
+      continue;
+    }
+
+    if (word.startsWith("##")) {
+      const suffix = word.slice(2);
+      if (current && chunk.slice(current.end).startsWith(suffix)) {
+        current.end += suffix.length;
+      }
+    } else {
+      const idx = chunk.indexOf(word, searchPos);
+      if (idx === -1) continue;
+
+      const gap = current ? chunk.slice(current.end, idx) : "";
+      if (current && tag === current.rawTag && /^\s*$/.test(gap)) {
+        current.end = idx + word.length;
+      } else {
+        flush();
+        current = { rawTag: tag, start: idx, end: idx + word.length };
+      }
+      searchPos = idx + word.length;
+    }
+  }
+  flush();
+  return entities;
+}
+
 // ── NER ───────────────────────────────────────────────────────────────────────
 
 async function runNer(text: string, requestedLabels: string[]): Promise<Match[]> {
   if (!ner || requestedLabels.length === 0) return [];
 
   const requestedNerTags = new Set(
-    requestedLabels.flatMap((l) => {
-      const entry = Object.entries(NER_TO_UI).find(([, v]) => v === l);
-      return entry ? [entry[0]] : [];
-    })
+    Object.entries(NER_TO_UI)
+      .filter(([, v]) => requestedLabels.includes(v))
+      .map(([k]) => k)
   );
 
   const nerMatches: Match[] = [];
@@ -94,20 +157,17 @@ async function runNer(text: string, requestedLabels: string[]): Promise<Match[]>
   for (const { chunk, start: chunkStart } of chunkText(text)) {
     if (!chunk.trim()) continue;
     try {
-      const predictions = await (ner as any)(chunk);
-      for (const p of predictions) {
-        const group: string = p.entity_group ?? p.entity ?? "";
-        const uiLabel = NER_TO_UI[group];
-        if (uiLabel && requestedNerTags.has(group)) {
-          const word = chunk.slice(p.start, p.end);
-          nerMatches.push({
-            text: word,
-            label: uiLabel,
-            start: chunkStart + p.start,
-            end: chunkStart + p.end,
-            source: "kblab",
-          });
-        }
+      const predictions: RawPrediction[] = await (ner as any)(chunk);
+      const grouped = aggregatePredictions(predictions, chunk);
+      for (const e of grouped) {
+        if (!requestedNerTags.has(e.rawTag)) continue;
+        nerMatches.push({
+          text: e.text,
+          label: NER_TO_UI[e.rawTag],
+          start: chunkStart + e.start,
+          end: chunkStart + e.end,
+          source: "kblab",
+        });
       }
     } catch (e) {
       console.error("NER chunk error:", e);
@@ -125,8 +185,6 @@ self.onmessage = async (e: MessageEvent) => {
   if (type === "load") {
     try {
       ner = await pipeline("token-classification", MODEL_ID, {
-        // @ts-expect-error aggregation_strategy is valid at runtime but missing from types
-        aggregation_strategy: "simple",
         progress_callback: (p: any) => {
           if (p.status === "progress" && p.total) {
             self.postMessage({ type: "progress", payload: Math.round((p.loaded / p.total) * 100) });
@@ -143,8 +201,11 @@ self.onmessage = async (e: MessageEvent) => {
     const { text, entities } = payload as { text: string; entities: string[] };
     try {
       const regexMatches = findRegexMatches(text);
+      console.log("[worker] regex:", regexMatches.length, "träffar");
       const nerMatches = await runNer(text, entities);
+      console.log("[worker] ner:", nerMatches.length, "träffar");
       const result = deduplicateMatches([...regexMatches, ...nerMatches]);
+      console.log("[worker] totalt:", result.length, "träffar");
       self.postMessage({ type: "results", payload: result });
     } catch (err) {
       self.postMessage({ type: "error", payload: String(err) });

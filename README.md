@@ -8,8 +8,8 @@ Maskera är ett lokalt verktyg för automatisk identifiering och maskering av pe
 
 Ladda upp en `.txt`-fil, välj vilka entitetstyper som ska sökas, och låt verktyget:
 
-1. **Identifiera** personuppgifter med en kombination av regelbaserad sökning (regex) och AI
-2. **Markera** träffarna direkt i texten med färgkodning per kategori
+1. **Identifiera** personuppgifter med regelbaserad sökning (regex) och AI direkt i webbläsaren
+2. **Markera** träffarna i texten med färgkodning per kategori
 3. **Granska** och justera — avmarkera felaktiga träffar eller lägg till missade ord manuellt
 4. **Exportera** en maskerad version av texten samt en översättningstabell
 
@@ -23,7 +23,9 @@ Ladda upp en `.txt`-fil, välj vilka entitetstyper som ska sökas, och låt verk
 | Person | AI (BERT) | `Anders Andersson` |
 | Organisation | AI (BERT) | `Försäkringskassan` |
 | Plats | AI (BERT) | `Stockholm` |
-| Övrigt | AI (BERT) | Övriga namngivna entiteter |
+| Övrigt | AI (BERT) | Diverse namngivna entiteter |
+| Tid | AI (BERT) | `idag`, `fem år` *(av som standard)* |
+| Händelse | AI (BERT) | `coronapandemin` *(av som standard)* |
 
 Regex-kategorier körs alltid. AI-kategorier kan slås av/på individuellt.
 
@@ -32,20 +34,22 @@ Regex-kategorier körs alltid. AI-kategorier kan slås av/på individuellt.
 ## Hur fungerar det?
 
 ```
-masking_engine (Python-binär)
-  ├── FastAPI-server på localhost:8594
-  │     ├── POST /analyze  →  regex-pass + BERT NER
-  │     └── GET  /         →  serverar React-gränssnittet
-  └── Öppnar webbläsaren automatiskt vid start
+Tauri-app (Rust-shell + WebView)
+  └── React-gränssnitt
+        └── Web Worker
+              ├── Regex-pass (personnummer, e-post, telefon) — alltid
+              └── Transformers.js → ONNX-modell (KBLab BERT NER)
+                    └── Körs lokalt i webbläsaren — ingen server behövs
 ```
 
 ### Analysflödet
 
-1. **Regex-pass** — tre mönster för personnummer, e-post och telefonnummer körs alltid
-2. **BERT NER** — texten delas i 1 500-teckens chunk för att hålla sig under BERT:s 512-tokengräns; varje chunk analyseras av KBLab-modellen
-3. **Deduplicering** — överlappande träffar filtreras bort (regex prioriteras vid konflikt)
-4. **Granskning** — användaren kan klicka på träffar för att ignorera dem, eller lägga till egna
-5. **Maskering** — aktiva träffar ersätts med etiketter som `[PERSON A]`, `[PERSONNUMMER 1]`
+1. **Regex-pass** — tre mönster för personnummer, e-post och telefonnummer
+2. **BERT NER** — texten delas i 1 500-teckens chunk för att hålla sig under BERT:s 512-tokengräns; varje chunk analyseras av ONNX-modellen via Transformers.js
+3. **Manuell aggregering** — råa token-prediktioner grupperas till hela namnentiteter med exakta teckenpositioner
+4. **Deduplicering** — överlappande träffar filtreras bort
+5. **Granskning** — användaren kan klicka för att ignorera träffar, eller lägga till egna
+6. **Maskering** — aktiva träffar ersätts med etiketter som `[PERSON A]`, `[PERSONNUMMER 1]`
 
 ### Översättningstabellen
 
@@ -53,7 +57,13 @@ Varje unik text mappas till ett konsekvent maskerat label:
 - AI-entiteter → bokstavssuffix: `Person A`, `Person B` …
 - Regex/manuella → numeriskt suffix: `Personnummer 1`, `E-post 2` …
 
-Tabellen kan exporteras som JSON eller tab-separerad TXT för vidare hantering.
+Tabellen kan exporteras som JSON eller tab-separerad TXT.
+
+### Modell
+
+AI-modellen ([KBLab/bert-base-swedish-cased-ner](https://huggingface.co/KBLab/bert-base-swedish-cased-ner)) är konverterad till ONNX-format och finns på HuggingFace: [psvensk/bert-base-swedish-cased-ner-onnx](https://huggingface.co/psvensk/bert-base-swedish-cased-ner-onnx).
+
+Modellen (~120 MB, kvantiserad int8) laddas ner automatiskt vid första körning och cachas i webbläsarens lokala lagring.
 
 ---
 
@@ -62,50 +72,37 @@ Tabellen kan exporteras som JSON eller tab-separerad TXT för vidare hantering.
 | Lager | Teknologi |
 |---|---|
 | AI-modell | [KBLab/bert-base-swedish-cased-ner](https://huggingface.co/KBLab/bert-base-swedish-cased-ner) — svensk BERT tränad på NER |
-| ML-ramverk | Hugging Face Transformers + PyTorch |
-| API-server | FastAPI + Uvicorn |
-| Gränssnitt | React 19 + TypeScript (byggs till statiska filer, serveras av FastAPI) |
-| Paketering | PyInstaller — allt i en enda körbar fil |
+| ML i webbläsaren | [Transformers.js](https://huggingface.co/docs/transformers.js) + ONNX Runtime WebAssembly |
+| Gränssnitt | React 19 + TypeScript |
+| Desktop-shell | [Tauri 2](https://tauri.app) (Rust) — ~5 MB binär |
 | CI/CD | GitHub Actions — automatiskt Windows-bygge vid push till `main` |
+
+**Ingen Python krävs** — varken för att köra eller bygga appen.
 
 ---
 
 ## Köra lokalt (källkod)
 
 ```bash
-# Installera Python-beroenden
-python -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
-pip install fastapi uvicorn pydantic transformers torch pyinstaller
-
-# Bygg gränssnittet
 npm install
-npm run build
-
-# Starta
-python masking_engine.py
+npm run tauri dev
 ```
 
-Webbläsaren öppnas automatiskt på `http://127.0.0.1:8594`. Stoppa med `Ctrl+C`.
+Tauri-fönstret öppnas automatiskt. Första gången laddas ONNX-modellen ner (~120 MB).
 
-> **Första start:** AI-modellen (~500 MB) laddas ner från Hugging Face automatiskt och cachas lokalt.
-
-## Bygga fristående binär
+## Bygga fristående app
 
 ```bash
-# Mac (Apple Silicon)
-npm run build
-pyinstaller --onefile masking_engine.py --name Maskera \
-  --add-data "dist:dist" --icon src-tauri/icons/icon.icns
+# Mac
+npm run tauri build
+# → src-tauri/target/release/bundle/macos/maskera.app
+# → src-tauri/target/release/bundle/dmg/maskera_x.x.x_aarch64.dmg
 
-# Windows
-npm run build
-pyinstaller --onefile masking_engine.py --name Maskera ^
-  --add-data "dist;dist" --icon src-tauri\icons\icon.ico
+# Windows (via GitHub Actions vid push till main)
 ```
 
 ---
 
 ## Releases
 
-Färdigbyggda Windows-versioner finns under [Releases](../../releases). Ladda ner `Maskera.exe` och kör — webbläsaren öppnas automatiskt.
+Färdigbyggda Windows-versioner finns under [Releases](../../releases). Ladda ner installationsfilen och kör.
