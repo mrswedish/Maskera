@@ -44,21 +44,25 @@ jobs:
       - name: Package as ZIP
         run: Compress-Archive -Path dist/Maskera/* -DestinationPath dist/Maskera-Windows.zip
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Delete existing latest release
         if: github.ref == 'refs/heads/main'
-        with:
-          tag_name: latest
-          name: "Maskera - Latest Build"
-          body: |
-            ## Installation
-            1. Ladda ner `Maskera-Windows.zip`
-            2. Extrahera mappen (högerklicka → Extrahera alla)
-            3. Öppna mappen och dubbelklicka på `Maskera.exe`
-            4. Högerklicka på `Maskera.exe` → Egenskaper → Avblockera om det efterfrågas
-            5. Din webbläsare öppnas automatiskt
+        run: gh release delete latest --yes --cleanup-tag
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-            Första gången laddas AI-modellen ner (~500 MB) och cachas lokalt.
-          files: dist/Maskera-Windows.zip
+      - name: Create GitHub Release
+        if: github.ref == 'refs/heads/main'
+        run: |
+          gh release create latest dist/Maskera-Windows.zip `
+            --title "Maskera - Latest Build" `
+            --notes "## Installation
+          1. Ladda ner \`Maskera-Windows.zip\`
+          2. Extrahera mappen (högerklicka → Extrahera alla)
+          3. Öppna mappen och dubbelklicka på \`Maskera.exe\`
+          4. Högerklicka på \`Maskera.exe\` → Egenskaper → Avblockera om det efterfrågas
+          5. Din webbläsare öppnas automatiskt
+
+          Första gången laddas AI-modellen ner (~500 MB) och cachas lokalt."
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
