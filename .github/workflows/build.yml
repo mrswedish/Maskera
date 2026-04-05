@@ -17,52 +17,28 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Enable Long Paths
-        run: |
-          git config --system core.longpaths true
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -Force
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
         with:
-          python-version: '3.11'
+          tagName: latest
+          releaseName: "Maskera - Latest Build"
+          releaseBody: |
+            ## Installation
+            Ladda ner och kör `Maskera_x.x.x_x64-setup.exe`.
 
-      - name: Build Frontend
-        run: npm install && npm run build
-
-      - name: Install Python Dependencies and Build Executable
-        run: |
-          python -m pip install --upgrade pip
-          pip install fastapi uvicorn pydantic transformers torch pyinstaller
-          pyinstaller --onedir --noconsole masking_engine.py --name Maskera --add-data "dist;dist" --icon src-tauri/icons/icon.ico
-
-      - name: Package as ZIP
-        run: Compress-Archive -Path dist/Maskera/* -DestinationPath dist/Maskera-Windows.zip
-
-      - name: Delete existing latest release
-        if: github.ref == 'refs/heads/main'
-        run: gh release delete latest --yes --cleanup-tag
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create GitHub Release
-        if: github.ref == 'refs/heads/main'
-        run: |
-          gh release create latest dist/Maskera-Windows.zip `
-            --title "Maskera - Latest Build" `
-            --notes "## Installation
-          1. Ladda ner \`Maskera-Windows.zip\`
-          2. Extrahera mappen (högerklicka → Extrahera alla)
-          3. Öppna mappen och dubbelklicka på \`Maskera.exe\`
-          4. Högerklicka på \`Maskera.exe\` → Egenskaper → Avblockera om det efterfrågas
-          5. Din webbläsare öppnas automatiskt
-
-          Första gången laddas AI-modellen ner (~500 MB) och cachas lokalt."
+            AI-modellen (~500 MB) laddas ner automatiskt första gången appen används och cachas lokalt.
+          releaseDraft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

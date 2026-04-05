@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback } from "react";
+import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { Upload, Shield, Download, FileText, CheckCircle2, Table, PlusCircle, X } from "lucide-react";
 import "./index.css";
 import type { Match } from "./types";
@@ -38,6 +38,33 @@ export default function App() {
   const [ignoredKeys, setIgnoredKeys] = useState<Set<string>>(new Set());
   const [entities, setEntities] = useState<string[]>([...ENTITY_LABELS]);
   const [showTranslationTable, setShowTranslationTable] = useState(false);
+  const [engineReady, setEngineReady] = useState(false);
+  const [loadProgress, setLoadProgress] = useState(0);
+  const workerRef = useRef<Worker | null>(null);
+
+  useEffect(() => {
+    const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
+    workerRef.current = worker;
+    worker.onmessage = (e) => {
+      const { type, payload } = e.data;
+      if (type === "ready") {
+        setEngineReady(true);
+      } else if (type === "progress") {
+        setLoadProgress(payload as number);
+      } else if (type === "results") {
+        const sorted = (payload as Match[]).sort((a, b) => a.start - b.start);
+        setMatches(sorted);
+        setIgnoredKeys(new Set());
+        setAnalyzing(false);
+      } else if (type === "error") {
+        console.error(payload);
+        alert("Fel vid analys: " + payload);
+        setAnalyzing(false);
+      }
+    };
+    worker.postMessage({ type: "load" });
+    return () => worker.terminate();
+  }, []);
 
   // Manuell tillägg
   const [manualWord, setManualWord] = useState("");
@@ -68,25 +95,10 @@ export default function App() {
     reader.readAsText(file);
   };
 
-  const handleAnalyze = async () => {
-    if (!fileContent) return;
+  const handleAnalyze = () => {
+    if (!fileContent || !workerRef.current) return;
     setAnalyzing(true);
-    try {
-      const res = await fetch("http://127.0.0.1:8594/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: fileContent, entities }),
-      });
-      const data = await res.json();
-      const sorted = (data as Match[]).sort((a, b) => a.start - b.start);
-      setMatches(sorted);
-      setIgnoredKeys(new Set());
-    } catch (err) {
-      console.error(err);
-      alert("Kunde inte ansluta till PI-motorn. Se till att den körs.");
-    } finally {
-      setAnalyzing(false);
-    }
+    workerRef.current.postMessage({ type: "analyze", payload: { text: fileContent, entities } });
   };
 
   const toggleIgnored = useCallback((key: string) => {
@@ -308,11 +320,16 @@ export default function App() {
 
           <button
             onClick={handleAnalyze}
-            disabled={!fileContent || analyzing}
+            disabled={!fileContent || analyzing || !engineReady}
             className="btn-primary"
           >
             {analyzing ? "Skannar text..." : "Granska Text"}
           </button>
+          {!engineReady && (
+            <p style={{ fontSize: "0.75rem", color: "#64748b", margin: 0, textAlign: "center" }}>
+              {loadProgress > 0 ? `Laddar AI-modell... ${loadProgress}%` : "Initierar AI-modell..."}
+            </p>
+          )}
         </div>
 
         {/* Textvisare */}
