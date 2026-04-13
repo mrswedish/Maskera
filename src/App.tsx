@@ -25,6 +25,18 @@ function matchKey(m: Match): string {
   return `${m.start}-${m.end}`;
 }
 
+function fixMojibake(text: string): string {
+  try {
+    const bytes = new Uint8Array(text.length);
+    for (let i = 0; i < text.length; i++) {
+      bytes[i] = text.charCodeAt(i) & 0xFF;
+    }
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return text;
+  }
+}
+
 function downloadBlob(content: string, type: string, filename: string) {
   const url = URL.createObjectURL(new Blob([content], { type }));
   const a = document.createElement("a");
@@ -100,7 +112,7 @@ export default function App() {
       const raw = ev.target?.result as string;
       // Normalisera radbrytningar och problematiska whitespace-tecken
       // så att regex-positioner och NER-positioner alltid stämmer.
-      const normalized = raw
+      const normalized = fixMojibake(raw)
         .replace(/\r\n/g, "\n")   // Windows → Unix
         .replace(/\r/g, "\n")     // gamla Mac
         .replace(/\u00a0/g, " ")  // non-breaking space
