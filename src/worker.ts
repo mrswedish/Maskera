@@ -26,23 +26,29 @@ let ner: any = null;
 
 // ── Regex ────────────────────────────────────────────────────────────────────
 
-function findRegexMatches(text: string): Match[] {
+function findRegexMatches(text: string, requestedLabels: string[]): Match[] {
   const matches: Match[] = [];
 
-  const pnr = /\b(?:\d{2})?\d{6}[-+]?\d{4}\b/g;
-  for (const m of text.matchAll(pnr)) {
-    matches.push({ text: m[0], label: "Personnummer", start: m.index!, end: m.index! + m[0].length, source: "regex" });
+  if (requestedLabels.includes("Personnummer")) {
+    const pnr = /\b(?:\d{2})?\d{6}[-+]?\d{4}\b/g;
+    for (const m of text.matchAll(pnr)) {
+      matches.push({ text: m[0], label: "Personnummer", start: m.index!, end: m.index! + m[0].length, source: "regex" });
+    }
   }
 
-  const email = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
-  for (const m of text.matchAll(email)) {
-    matches.push({ text: m[0], label: "E-post", start: m.index!, end: m.index! + m[0].length, source: "regex" });
+  if (requestedLabels.includes("E-post")) {
+    const email = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
+    for (const m of text.matchAll(email)) {
+      matches.push({ text: m[0], label: "E-post", start: m.index!, end: m.index! + m[0].length, source: "regex" });
+    }
   }
 
-  const phone = /(?:(?:0|\+46|0046)\s?(?:[1-9]\d{1,2}\s?(?:[- ]?\d{2,3}){1,3}|\d{2,3}\s?(?:[- ]?\d{2,3}){1,3}))/g;
-  for (const m of text.matchAll(phone)) {
-    const trimmed = m[0].trimEnd();
-    matches.push({ text: trimmed, label: "Telefonnummer", start: m.index!, end: m.index! + trimmed.length, source: "regex" });
+  if (requestedLabels.includes("Telefonnummer")) {
+    const phone = /(?:(?:0|\+46|0046)\s?(?:[1-9]\d{1,2}\s?(?:[- ]?\d{2,3}){1,3}|\d{2,3}\s?(?:[- ]?\d{2,3}){1,3}))/g;
+    for (const m of text.matchAll(phone)) {
+      const trimmed = m[0].trimEnd();
+      matches.push({ text: trimmed, label: "Telefonnummer", start: m.index!, end: m.index! + trimmed.length, source: "regex" });
+    }
   }
 
   return matches;
@@ -200,7 +206,7 @@ self.onmessage = async (e: MessageEvent) => {
   if (type === "analyze") {
     const { text, entities } = payload as { text: string; entities: string[] };
     try {
-      const regexMatches = findRegexMatches(text);
+      const regexMatches = findRegexMatches(text, entities);
       console.log("[worker] regex:", regexMatches.length, "träffar");
       const nerMatches = await runNer(text, entities);
       console.log("[worker] ner:", nerMatches.length, "träffar");

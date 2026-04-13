@@ -4,8 +4,9 @@ import "./index.css";
 import type { Match } from "./types";
 import { buildTranslationTable } from "./translationUtils";
 
+const REGEX_LABELS = ["Personnummer", "E-post", "Telefonnummer"] as const;
 const ENTITY_LABELS = ["Person", "Organisation", "Plats", "Övrigt", "Tid", "Händelse"] as const;
-const DEFAULT_ENTITIES = ["Person", "Organisation", "Plats", "Övrigt"];
+const DEFAULT_ENTITIES = [...REGEX_LABELS, "Person", "Organisation", "Plats", "Övrigt"];
 
 const COLORS: Record<string, string> = {
   Personnummer: "#ef4444",
@@ -29,8 +30,10 @@ function downloadBlob(content: string, type: string, filename: string) {
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(url);
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
 export default function App() {
@@ -271,10 +274,22 @@ export default function App() {
           </div>
 
           <div>
-            <h2 className="panel-title" style={{ marginBottom: "0.5rem" }}>Vad ska maskeras?</h2>
-            <p style={{ fontSize: "0.75rem", color: "#94a3b8", marginBottom: "1rem", marginTop: 0 }}>
-              OBS: Personnummer, e-post och telefonnummer söks alltid (Regex).
-            </p>
+            <h2 className="panel-title" style={{ marginBottom: "0.75rem" }}>Vad ska maskeras?</h2>
+            <p style={{ fontSize: "0.72rem", color: "#64748b", marginBottom: "0.5rem", marginTop: 0 }}>Regex</p>
+            <div className="checkbox-group" style={{ marginBottom: "0.75rem" }}>
+              {REGEX_LABELS.map((ent) => (
+                <label key={ent} className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={entities.includes(ent)}
+                    onChange={() => toggleEntity(ent)}
+                    className="checkbox-input"
+                  />
+                  <span>{ent}</span>
+                </label>
+              ))}
+            </div>
+            <p style={{ fontSize: "0.72rem", color: "#64748b", marginBottom: "0.5rem", marginTop: 0 }}>AI (BERT)</p>
             <div className="checkbox-group">
               {ENTITY_LABELS.map((ent) => (
                 <label key={ent} className="checkbox-label">
@@ -284,7 +299,7 @@ export default function App() {
                     onChange={() => toggleEntity(ent)}
                     className="checkbox-input"
                   />
-                  <span>{ent} (AI)</span>
+                  <span>{ent}</span>
                 </label>
               ))}
             </div>
