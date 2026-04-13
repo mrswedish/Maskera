@@ -118,8 +118,11 @@ function aggregatePredictions(preds: RawPrediction[], chunk: string): Aggregated
     if (!NER_TO_UI[tag]) {
       flush();
       if (!word.startsWith("##")) {
+        // Advance searchPos only if the word is found close by (within 200 chars).
+        // Common words like "och", "på" can appear anywhere — don't let them
+        // shoot searchPos past a real entity that comes next in token order.
         const idx = chunk.indexOf(word, searchPos);
-        if (idx !== -1) searchPos = idx + word.length;
+        if (idx !== -1 && idx - searchPos <= 200) searchPos = idx + word.length;
       }
       continue;
     }
@@ -158,10 +161,20 @@ async function runNer(text: string, requestedLabels: string[]): Promise<Match[]>
       .map(([k]) => k)
   );
 
-  const nerMatches: Match[] = [];
+  if (requestedNerTags.size === 0) return [];
 
-  for (const { chunk, start: chunkStart } of chunkText(text)) {
+  const nerMatches: Match[] = [];
+  const chunks = chunkText(text);
+
+  for (let i = 0; i < chunks.length; i++) {
+    const { chunk, start: chunkStart } = chunks[i];
     if (!chunk.trim()) continue;
+
+    // Yield to runtime every 10 chunks so GC can reclaim WASM memory
+    if (i > 0 && i % 10 === 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+
     try {
       const predictions: RawPrediction[] = await (ner as any)(chunk);
       const grouped = aggregatePredictions(predictions, chunk);
@@ -176,7 +189,7 @@ async function runNer(text: string, requestedLabels: string[]): Promise<Match[]>
         });
       }
     } catch (e) {
-      console.error("NER chunk error:", e);
+      console.error(`NER chunk ${i} error:`, e);
     }
   }
 
