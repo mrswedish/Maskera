@@ -117,12 +117,15 @@ function aggregatePredictions(preds: RawPrediction[], chunk: string): Aggregated
 
     if (!NER_TO_UI[tag]) {
       flush();
-      if (!word.startsWith("##")) {
+      if (!word.startsWith("##") && word !== "[UNK]") {
         // Advance searchPos only if the word is found close by (within 200 chars).
         // Common words like "och", "på" can appear anywhere — don't let them
         // shoot searchPos past a real entity that comes next in token order.
         const idx = chunk.indexOf(word, searchPos);
         if (idx !== -1 && idx - searchPos <= 200) searchPos = idx + word.length;
+      } else if (word === "[UNK]") {
+        // Unknown token (exotic char) — advance by 1 to not get stuck
+        searchPos = Math.min(searchPos + 1, chunk.length);
       }
       continue;
     }
@@ -132,6 +135,10 @@ function aggregatePredictions(preds: RawPrediction[], chunk: string): Aggregated
       if (current && chunk.slice(current.end).startsWith(suffix)) {
         current.end += suffix.length;
       }
+    } else if (word === "[UNK]") {
+      // UNK inside an entity — extend current by 1 char if possible
+      if (current) current.end = Math.min(current.end + 1, chunk.length);
+      searchPos = Math.min(searchPos + 1, chunk.length);
     } else {
       const idx = chunk.indexOf(word, searchPos);
       if (idx === -1) continue;

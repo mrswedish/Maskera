@@ -97,7 +97,17 @@ export default function App() {
     setFileName(file.name);
     const reader = new FileReader();
     reader.onload = (ev) => {
-      setFileContent(ev.target?.result as string);
+      const raw = ev.target?.result as string;
+      // Normalisera radbrytningar och problematiska whitespace-tecken
+      // så att regex-positioner och NER-positioner alltid stämmer.
+      const normalized = raw
+        .replace(/\r\n/g, "\n")   // Windows → Unix
+        .replace(/\r/g, "\n")     // gamla Mac
+        .replace(/\u00a0/g, " ")  // non-breaking space
+        .replace(/\u2028/g, "\n") // line separator
+        .replace(/\u2029/g, "\n") // paragraph separator
+        .replace(/\ufffd/g, " "); // replacement char (trasig encoding)
+      setFileContent(normalized);
       setMatches([]);
       setIgnoredKeys(new Set());
       setShowTranslationTable(false);
