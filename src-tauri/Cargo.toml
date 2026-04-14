@@ -29,7 +29,8 @@ tokenizers = { version = "0.21", default-features = false, features = ["fancy-re
 ndarray = "0.16"
 regex = "1"
 tauri-plugin-dialog = "2"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "native-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "native-tls"] }
+futures-util = "0.3"
 
 # ── Dev-profil: optimera dependencies med O3 även i debug-bygget ──────────────
 # Utan detta är tract-onnx ~20x långsammare (ingen SIMD, ingen inlining).

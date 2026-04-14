@@ -68,56 +68,16 @@ function fixByteOffsets(text: string, rawMatches: Match[]): Match[] {
   }));
 }
 
-const HF_BASE = "https://huggingface.co/psvensk/bert-base-swedish-cased-ner-onnx/resolve/main";
-const MODEL_FILES = ["model_quantized.onnx", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "config.json"];
-
-/** Laddar ner modellfilerna via WebView fetch() — använder systemproxy + OS-certifikat */
-async function downloadModels(
-  setStatus: (s: string) => void,
-  setProgress: (p: { file: string; downloaded: number; total: number } | null) => void
-): Promise<void> {
-  const modelsDir = await invoke<string>("get_model_dir");
-
-  for (const filename of MODEL_FILES) {
-    setStatus(`Laddar ner ${filename}…`);
-    const resp = await fetch(`${HF_BASE}/${filename}`);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status} för ${filename}`);
-
-    const total = parseInt(resp.headers.get("content-length") ?? "0");
-    const reader = resp.body!.getReader();
-    let downloaded = 0;
-    let firstChunk = true;
-
-    // Bygg sökvägen med rätt separator (Rust returnerar OS-native sökväg)
-    const sep = modelsDir.includes("\\") ? "\\" : "/";
-    const filePath = modelsDir + sep + filename;
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      downloaded += value.length;
-      // Skicka chunk till Rust som skriver till disk
-      await invoke("save_model_chunk", {
-        path: filePath,
-        data: Array.from(value),
-        truncate: firstChunk,
-      });
-      firstChunk = false;
-      setProgress({ file: filename, downloaded, total });
-    }
-  }
-  setProgress(null);
-}
-
-/** Kontrollerar om modellen finns, laddar annars ner via fetch, laddar sedan i Rust */
+/** Kontrollerar om modellen finns, laddar annars ner via Rust async streaming, laddar sedan i Rust */
 async function initModel(
   setStatus: (s: string) => void,
-  setProgress: (p: { file: string; downloaded: number; total: number } | null) => void
+  _setProgress: (p: { file: string; downloaded: number; total: number } | null) => void
 ): Promise<void> {
   setStatus("Kontrollerar modellfiler…");
   const exists = await invoke<boolean>("models_exist");
   if (!exists) {
-    await downloadModels(setStatus, setProgress);
+    setStatus("Laddar ner modell från HuggingFace…");
+    await invoke("download_model"); // Rust hanterar streaming + progress-events
   }
   await invoke("load_model"); // laddar från disk, emitterar model_ready
 }
@@ -156,6 +116,7 @@ export default function App() {
       listen<void>("model_ready", () => { setEngineReady(true); setDownloadProgress(null); }),
       listen<{ chunk: number; total: number }>("ner_progress", (e) => setNerProgress(e.payload)),
       listen<{ message: string }>("model_status", (e) => setModelStatus(e.payload.message)),
+      listen<{ file: string; downloaded: number; total: number }>("download_progress", (e) => setDownloadProgress(e.payload)),
     ]).then((fns) => {
       unlisteners.push(...fns);
       initModel(setModelStatus, setDownloadProgress).catch((e) =>

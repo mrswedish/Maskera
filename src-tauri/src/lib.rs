@@ -20,6 +20,9 @@ const MODEL_FILES: &[&str] = &[
     "config.json",
 ];
 
+const HF_BASE: &str =
+    "https://huggingface.co/psvensk/bert-base-swedish-cased-ner-onnx/resolve/main";
+
 // ── Event-payloads ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Serialize)]
@@ -27,6 +30,9 @@ struct NerProgress { chunk: usize, total: usize }
 
 #[derive(Clone, Serialize)]
 struct ModelStatus { message: String }
+
+#[derive(Clone, Serialize)]
+struct DownloadProgress { file: String, downloaded: u64, total: u64 }
 
 // ── Hjälpfunktion ─────────────────────────────────────────────────────────────
 
@@ -42,17 +48,9 @@ fn models_dir(app: &AppHandle) -> Result<PathBuf, String> {
 
 // ── Kommandon ─────────────────────────────────────────────────────────────────
 
-/// Returnerar sökvägen till modell-katalogen.
-/// JS-lagret använder detta för att veta var nedladdade filer ska sparas.
-#[tauri::command]
-fn get_model_dir(app: AppHandle) -> Result<String, String> {
-    models_dir(&app).map(|p| p.to_string_lossy().into_owned())
-}
-
 /// Kontrollerar om alla modellfiler finns lokalt (finns också fallback-källa).
 #[tauri::command]
 fn models_exist(app: AppHandle) -> Result<bool, String> {
-    // Kolla även resource_dir som dev-fallback (src-tauri/models/)
     let data = models_dir(&app)?;
     let resource = app.path().resource_dir().ok().map(|d| d.join("models"));
 
@@ -64,20 +62,68 @@ fn models_exist(app: AppHandle) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Sparar ett binärt chunk till en fil.
-/// Kallas upprepade gånger av JS fetch-streamen.
-/// `truncate=true` vid första chunken, `false` vid resterande.
+/// Laddar ner modellfilerna från HuggingFace via async streaming.
+/// Använder reqwest med stream-feature — ingen blocking, ingen UI-frysning.
+/// Emitterar "download_progress" och "model_status" events löpande.
 #[tauri::command]
-fn save_model_chunk(path: String, data: Vec<u8>, truncate: bool) -> Result<(), String> {
+async fn download_model(app: AppHandle) -> Result<(), String> {
+    use futures_util::StreamExt;
     use std::io::Write;
-    let mut opts = std::fs::OpenOptions::new();
-    if truncate {
-        opts.create(true).write(true).truncate(true);
-    } else {
-        opts.create(true).append(true);
+
+    let dir = models_dir(&app)?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .map_err(|e| format!("HTTP-klient-fel: {e}"))?;
+
+    for &filename in MODEL_FILES {
+        let dest = dir.join(filename);
+        if dest.exists() { continue; }
+
+        let _ = app.emit("model_status", ModelStatus {
+            message: format!("Laddar ner {filename}…"),
+        });
+
+        let resp = client
+            .get(format!("{HF_BASE}/{filename}"))
+            .send()
+            .await
+            .map_err(|e| format!("Nätverksfel för {filename}: {e}"))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {} för {filename}", resp.status()));
+        }
+
+        let total = resp.content_length().unwrap_or(0);
+        let tmp = dest.with_extension("part");
+        let mut file = std::fs::File::create(&tmp)
+            .map_err(|e| format!("Kan inte skapa tempfil för {filename}: {e}"))?;
+        let mut downloaded: u64 = 0;
+        let mut stream = resp.bytes_stream();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| format!("Läsfel för {filename}: {e}"))?;
+            file.write_all(&chunk)
+                .map_err(|e| format!("Skrivfel för {filename}: {e}"))?;
+            downloaded += chunk.len() as u64;
+            let _ = app.emit("download_progress", DownloadProgress {
+                file: filename.to_string(),
+                downloaded,
+                total,
+            });
+        }
+
+        drop(file);
+        // Atomic rename: .part → slutlig fil (Windows-safe fallback till copy)
+        if std::fs::rename(&tmp, &dest).is_err() {
+            std::fs::copy(&tmp, &dest)
+                .map_err(|e| format!("Kunde inte flytta {filename}: {e}"))?;
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
-    let mut f = opts.open(&path).map_err(|e| e.to_string())?;
-    f.write_all(&data).map_err(|e| e.to_string())
+
+    Ok(())
 }
 
 /// Kopierar modellfiler från en manuellt vald mapp (för brandväggsbegränsade miljöer).
@@ -111,7 +157,7 @@ async fn load_model_from_dir(src_dir: String, app: AppHandle) -> Result<(), Stri
 }
 
 /// Laddar ONNX-modell + tokenizer från modell-katalogen.
-/// Filer måste finnas på disk redan (nedladdade av JS eller kopierade manuellt).
+/// Filer måste finnas på disk redan (nedladdade av download_model eller kopierade manuellt).
 #[tauri::command]
 async fn load_model(app: AppHandle) -> Result<(), String> {
     if SESSION.get().is_some() {
@@ -139,7 +185,6 @@ async fn load_model(app: AppHandle) -> Result<(), String> {
                 continue;
             }
         }
-        // Filen saknas — JS-lagret ansvarar för nedladdning, inte Rust
         return Err(format!("Modellfil saknas: {filename}. Starta om appen för att ladda ner."));
     }
 
@@ -236,7 +281,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
-            get_model_dir, models_exist, save_model_chunk,
+            models_exist, download_model,
             load_model, load_model_from_dir, analyze_text, write_file
         ])
         .run(tauri::generate_context!())
