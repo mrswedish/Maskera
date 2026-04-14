@@ -40,6 +40,11 @@ struct DownloadProgress {
     total: u64,     // 0 = okänd storlek
 }
 
+#[derive(Clone, Serialize)]
+struct ModelStatus {
+    message: String,
+}
+
 // ── Hjälpfunktion: ladda ner en fil med progress-events ──────────────────────
 
 fn download_file(
@@ -51,8 +56,16 @@ fn download_file(
     use std::io::Write;
 
     eprintln!("[download] {filename} → {dest:?}");
-    let mut resp = reqwest::blocking::get(url)
-        .map_err(|e| format!("HTTP-fel för {filename}: {e}"))?;
+
+    // Bygg klient med timeout — annars hänger anslutningen tyst på Windows
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(600)) // max 10 min för 120 MB
+        .build()
+        .map_err(|e| format!("reqwest-klient-fel: {e}"))?;
+
+    let mut resp = client.get(url).send()
+        .map_err(|e| format!("Nedladdningsfel för {filename}: {e}"))?;
 
     if !resp.status().is_success() {
         return Err(format!("HTTP {} för {filename}", resp.status()));
@@ -114,29 +127,59 @@ async fn load_model(app: AppHandle) -> Result<(), String> {
     std::fs::create_dir_all(&data_dir)
         .map_err(|e| format!("Kan inte skapa modellkatalog: {e}"))?;
 
-    eprintln!("[load_model] Modellkatalog: {data_dir:?}");
+    // Fallback-katalog: src-tauri/models/ (finns i dev-läge om modeller laddats ner manuellt)
+    let resource_models = app.path().resource_dir().ok().map(|d| d.join("models"));
 
-    // Ladda ner saknade filer
-    for &filename in MODEL_FILES {
-        let dest = data_dir.join(filename);
-        if dest.exists() {
-            eprintln!("[load_model] {filename} finns redan — hoppar över");
-            continue;
-        }
-        let url = format!("{HF_BASE}/{filename}");
-        download_file(&url, &dest, &app, filename)?;
+    eprintln!("[load_model] App-datakatalog: {data_dir:?}");
+    if let Some(ref rd) = resource_models {
+        eprintln!("[load_model] Resurs-fallback:  {rd:?}");
     }
 
-    let model_path = data_dir.join("model_quantized.onnx");
-    let tok_path   = data_dir.join("tokenizer.json");
+    // Skicka omedelbar status till UI — syns innan spawn_blocking ens startar
+    let _ = app.emit("model_status", ModelStatus { message: "Kontrollerar modellfiler…".into() });
 
-    eprintln!("[load_model] Laddar modell från {model_path:?}");
-    app.emit("model_ready", ()).ok(); // töm "laddar"-texten, visa "optimerar..."
+    // Allt tungt (nedladdning + modell-optimering) körs i spawn_blocking.
+    // reqwest::blocking FÅR INTE anropas direkt i async fn — blockerar tokio-tråden.
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        // Ladda ner saknade filer — hoppa över om de redan finns i app_data_dir
+        // ELLER i resource_dir (dev-fallback där modeller ofta finns lokalt)
+        for &filename in MODEL_FILES {
+            let dest = data_dir.join(filename);
+            if dest.exists() {
+                eprintln!("[load_model] {filename} finns i data-katalog");
+                continue;
+            }
+            // Dev-fallback: kopiera från resource_dir om filen finns där
+            if let Some(ref rd) = resource_models {
+                let src = rd.join(filename);
+                if src.exists() {
+                    eprintln!("[load_model] {filename} kopieras från resurs-katalog");
+                    std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+                    std::fs::copy(&src, &dest).map_err(|e| e.to_string())?;
+                    continue;
+                }
+            }
+            // Ladda ner från HuggingFace
+            eprintln!("[load_model] {filename} saknas — laddar ner från HuggingFace");
+            let _ = app_clone.emit("model_status", ModelStatus {
+                message: format!("Laddar ner {filename} från HuggingFace…"),
+            });
+            std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+            let url = format!("{HF_BASE}/{filename}");
+            download_file(&url, &dest, &app_clone, filename)?;
+        }
 
-    let result = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let model_path = data_dir.join("model_quantized.onnx");
+        let tok_path   = data_dir.join("tokenizer.json");
+
+        let _ = app_clone.emit("model_status", ModelStatus {
+            message: "Optimerar AI-modell (tar ~30 sek första gången)…".into(),
+        });
+        eprintln!("[load_model] Laddar och optimerar ONNX-modell…");
         let model = ner::load_model(&model_path)
             .map_err(|e| format!("Modell-laddning misslyckades: {e}"))?;
-        eprintln!("[load_model] ONNX-modell laddad och optimerad");
+        eprintln!("[load_model] ONNX-modell klar");
 
         let tokenizer = ner::load_tokenizer(&tok_path)
             .map_err(|e| format!("Tokenizer-laddning misslyckades: {e}"))?;
@@ -151,7 +194,7 @@ async fn load_model(app: AppHandle) -> Result<(), String> {
 
     eprintln!("[load_model] Emitterar model_ready");
     app.emit("model_ready", ()).map_err(|e| e.to_string())?;
-    Ok(result)
+    Ok(())
 }
 
 /// Kör regex + NER på `text` och returnerar en lista av Match.

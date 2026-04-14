@@ -88,39 +88,28 @@ export default function App() {
   const [engineReady, setEngineReady] = useState(false);
   const [nerProgress, setNerProgress] = useState<{ chunk: number; total: number } | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<{ file: string; downloaded: number; total: number } | null>(null);
+  const [modelStatus, setModelStatus] = useState<string>("Laddar AI-modell…");
   const [showSettings, setShowSettings] = useState(false);
   const [threshold, setThreshold] = useState(0.60);
 
   useEffect(() => {
-    let unlistenReady: (() => void) | null = null;
-    let unlistenProg:  (() => void) | null = null;
-
     // Registrera lyssnare INNAN invoke — annars kan model_ready emitteras
     // innan lyssnaren är registrerad (race condition).
-    let unlistenDl: (() => void) | null = null;
+    const unlisteners: (() => void)[] = [];
 
     Promise.all([
       listen<void>("model_ready", () => { setEngineReady(true); setDownloadProgress(null); }),
-      listen<{ chunk: number; total: number }>("ner_progress", (e) =>
-        setNerProgress(e.payload)
-      ),
-      listen<{ file: string; downloaded: number; total: number }>("download_progress", (e) =>
-        setDownloadProgress(e.payload)
-      ),
-    ]).then(([uR, uP, uD]) => {
-      unlistenReady = uR;
-      unlistenProg  = uP;
-      unlistenDl    = uD;
+      listen<{ chunk: number; total: number }>("ner_progress", (e) => setNerProgress(e.payload)),
+      listen<{ file: string; downloaded: number; total: number }>("download_progress", (e) => setDownloadProgress(e.payload)),
+      listen<{ message: string }>("model_status", (e) => setModelStatus(e.payload.message)),
+    ]).then((fns) => {
+      unlisteners.push(...fns);
       invoke("load_model").catch((e) =>
         alert("Modell-laddning misslyckades: " + String(e))
       );
     });
 
-    return () => {
-      unlistenReady?.();
-      unlistenProg?.();
-      unlistenDl?.();
-    };
+    return () => { unlisteners.forEach(f => f()); };
   }, []);
 
   // Manuell tillägg
@@ -493,7 +482,7 @@ export default function App() {
                 </>
               ) : (
                 <p style={{ fontSize: "0.75rem", color: "#64748b", margin: 0, textAlign: "center" }}>
-                  Laddar AI-modell...
+                  {modelStatus}
                 </p>
               )}
             </div>
