@@ -268,6 +268,57 @@ fn run_regex(text: &str, requested: &[String]) -> Vec<Match> {
     matches
 }
 
+/// Kopierar modellfiler från en användarvald mapp till app_data_dir och laddar dem.
+/// Anropas när automatisk nedladdning misslyckas (t.ex. företags-proxy).
+#[tauri::command]
+async fn load_model_from_dir(src_dir: String, app: AppHandle) -> Result<(), String> {
+    let src = PathBuf::from(&src_dir);
+    let data_dir: PathBuf = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Kan inte hitta app-datakatalog: {e}"))?
+        .join("models");
+
+    std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+
+    // Verifiera att de nödvändiga filerna finns i källmappen
+    let missing: Vec<&str> = MODEL_FILES.iter()
+        .filter(|&&f| !src.join(f).exists())
+        .copied()
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!("Saknade filer i vald mapp: {}", missing.join(", ")));
+    }
+
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        for &filename in MODEL_FILES {
+            let from = src.join(filename);
+            let to   = data_dir.join(filename);
+            let _ = app_clone.emit("model_status", ModelStatus {
+                message: format!("Kopierar {filename}…"),
+            });
+            std::fs::copy(&from, &to)
+                .map_err(|e| format!("Kunde inte kopiera {filename}: {e}"))?;
+        }
+        let _ = app_clone.emit("model_status", ModelStatus {
+            message: "Optimerar AI-modell…".into(),
+        });
+        let model = ner::load_model(&data_dir.join("model_quantized.onnx"))
+            .map_err(|e| format!("Modell-laddning misslyckades: {e}"))?;
+        let tokenizer = ner::load_tokenizer(&data_dir.join("tokenizer.json"))
+            .map_err(|e| format!("Tokenizer-laddning misslyckades: {e}"))?;
+        let _ = SESSION.set(model);
+        let _ = TOKENIZER.set(tokenizer);
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking-fel: {e}"))??;
+
+    app.emit("model_ready", ()).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ── Filsparning via native dialog ─────────────────────────────────────────────
 
 #[tauri::command]
@@ -283,7 +334,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![load_model, analyze_text, write_file])
+        .invoke_handler(tauri::generate_handler![load_model, load_model_from_dir, analyze_text, write_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

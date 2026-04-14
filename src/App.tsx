@@ -2,7 +2,7 @@ import React, { useState, useMemo, useCallback, useEffect } from "react";
 import { Upload, Shield, Download, FileText, CheckCircle2, Table, PlusCircle, X, Settings } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { save } from "@tauri-apps/plugin-dialog";
+import { save, open } from "@tauri-apps/plugin-dialog";
 import "./index.css";
 import type { Match } from "./types";
 import { buildTranslationTable } from "./translationUtils";
@@ -481,9 +481,39 @@ export default function App() {
                   </p>
                 </>
               ) : (
-                <p style={{ fontSize: "0.75rem", color: "#64748b", margin: 0, textAlign: "center" }}>
-                  {modelStatus}
-                </p>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem", alignItems: "center" }}>
+                  <p style={{ fontSize: "0.75rem", color: "#64748b", margin: 0, textAlign: "center" }}>
+                    {modelStatus}
+                  </p>
+                  <button
+                    style={{
+                      fontSize: "0.7rem", color: "#475569", background: "none",
+                      border: "1px solid #334155", borderRadius: "4px",
+                      padding: "0.2rem 0.6rem", cursor: "pointer",
+                    }}
+                    onClick={async () => {
+                      const dir = await open({ directory: true, title: "Välj mapp med modellfiler" });
+                      if (!dir) return;
+                      const path = Array.isArray(dir) ? dir[0] : dir;
+                      invoke("load_model_from_dir", { srcDir: path })
+                        .catch((e) => alert("Fel vid manuell laddning: " + String(e)));
+                    }}
+                    title="Ladda ner modellfilerna manuellt via webbläsaren och peka hit"
+                  >
+                    Välj modellmapp manuellt
+                  </button>
+                  <p style={{ fontSize: "0.65rem", color: "#334155", margin: 0, textAlign: "center" }}>
+                    Ladda ner från{" "}
+                    <a
+                      href="https://huggingface.co/psvensk/bert-base-swedish-cased-ner-onnx"
+                      target="_blank" rel="noreferrer"
+                      style={{ color: "#818cf8" }}
+                    >
+                      HuggingFace
+                    </a>
+                    {" "}och välj mappen
+                  </p>
+                </div>
               )}
             </div>
           )}
