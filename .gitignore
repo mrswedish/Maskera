@@ -35,3 +35,6 @@ icon_source.png
 
 # Tauri sidecar binaries
 src-tauri/bin/
+
+# ML-modeller laddas ner från HuggingFace vid första start
+src-tauri/models/

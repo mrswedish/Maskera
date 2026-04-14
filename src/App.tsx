@@ -1,5 +1,8 @@
-import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
-import { Upload, Shield, Download, FileText, CheckCircle2, Table, PlusCircle, X } from "lucide-react";
+import React, { useState, useMemo, useCallback, useEffect } from "react";
+import { Upload, Shield, Download, FileText, CheckCircle2, Table, PlusCircle, X, Settings } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { save } from "@tauri-apps/plugin-dialog";
 import "./index.css";
 import type { Match } from "./types";
 import { buildTranslationTable } from "./translationUtils";
@@ -37,15 +40,41 @@ function fixMojibake(text: string): string {
   }
 }
 
-function downloadBlob(content: string, type: string, filename: string) {
-  const url = URL.createObjectURL(new Blob([content], { type }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
+/**
+ * Rust returnerar byte-offset i UTF-8. JS string.slice() vill ha
+ * teckenindex (UTF-16 code units). Konverterar alla match-positioner.
+ */
+function fixByteOffsets(text: string, rawMatches: Match[]): Match[] {
+  if (rawMatches.length === 0) return rawMatches;
+  const bytes = new TextEncoder().encode(text);
+  // Samla alla byte-positioner vi behöver slå upp
+  const needed = new Set<number>();
+  for (const m of rawMatches) { needed.add(m.start); needed.add(m.end); }
+  const byteToChar = new Map<number, number>();
+  let charIdx = 0;
+  let byteIdx = 0;
+  while (byteIdx <= bytes.length) {
+    if (needed.has(byteIdx)) byteToChar.set(byteIdx, charIdx);
+    if (byteIdx === bytes.length) break;
+    const b = bytes[byteIdx];
+    byteIdx += b < 0x80 ? 1 : b < 0xE0 ? 2 : b < 0xF0 ? 3 : 4;
+    charIdx++;
+  }
+  return rawMatches.map(m => ({
+    ...m,
+    start: byteToChar.get(m.start) ?? m.start,
+    end:   byteToChar.get(m.end)   ?? m.end,
+  }));
+}
+
+async function saveTextFile(content: string, defaultName: string): Promise<void> {
+  const path = await save({ defaultPath: defaultName, filters: [{ name: "Text", extensions: ["txt"] }] });
+  if (path) await invoke("write_file", { path, content });
+}
+
+async function saveJsonFile(content: string, defaultName: string): Promise<void> {
+  const path = await save({ defaultPath: defaultName, filters: [{ name: "JSON", extensions: ["json"] }] });
+  if (path) await invoke("write_file", { path, content });
 }
 
 export default function App() {
@@ -57,35 +86,41 @@ export default function App() {
   const [entities, setEntities] = useState<string[]>(DEFAULT_ENTITIES);
   const [showTranslationTable, setShowTranslationTable] = useState(false);
   const [engineReady, setEngineReady] = useState(false);
-  const [loadProgress, setLoadProgress] = useState(0);
-  const workerRef = useRef<Worker | null>(null);
+  const [nerProgress, setNerProgress] = useState<{ chunk: number; total: number } | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState<{ file: string; downloaded: number; total: number } | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [threshold, setThreshold] = useState(0.60);
 
   useEffect(() => {
-    const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
-    workerRef.current = worker;
-    worker.onerror = (e) => {
-      console.error("Worker kraschade:", e);
-      alert("AI-motorn kraschade: " + e.message);
+    let unlistenReady: (() => void) | null = null;
+    let unlistenProg:  (() => void) | null = null;
+
+    // Registrera lyssnare INNAN invoke — annars kan model_ready emitteras
+    // innan lyssnaren är registrerad (race condition).
+    let unlistenDl: (() => void) | null = null;
+
+    Promise.all([
+      listen<void>("model_ready", () => { setEngineReady(true); setDownloadProgress(null); }),
+      listen<{ chunk: number; total: number }>("ner_progress", (e) =>
+        setNerProgress(e.payload)
+      ),
+      listen<{ file: string; downloaded: number; total: number }>("download_progress", (e) =>
+        setDownloadProgress(e.payload)
+      ),
+    ]).then(([uR, uP, uD]) => {
+      unlistenReady = uR;
+      unlistenProg  = uP;
+      unlistenDl    = uD;
+      invoke("load_model").catch((e) =>
+        alert("Modell-laddning misslyckades: " + String(e))
+      );
+    });
+
+    return () => {
+      unlistenReady?.();
+      unlistenProg?.();
+      unlistenDl?.();
     };
-    worker.onmessage = (e) => {
-      const { type, payload } = e.data;
-      if (type === "ready") {
-        setEngineReady(true);
-      } else if (type === "progress") {
-        setLoadProgress(payload as number);
-      } else if (type === "results") {
-        const sorted = (payload as Match[]).sort((a, b) => a.start - b.start);
-        setMatches(sorted);
-        setIgnoredKeys(new Set());
-        setAnalyzing(false);
-      } else if (type === "error") {
-        console.error(payload);
-        alert("Fel vid analys: " + payload);
-        setAnalyzing(false);
-      }
-    };
-    worker.postMessage({ type: "load" });
-    return () => worker.terminate();
   }, []);
 
   // Manuell tillägg
@@ -127,10 +162,21 @@ export default function App() {
     reader.readAsText(file);
   };
 
-  const handleAnalyze = () => {
-    if (!fileContent || !workerRef.current) return;
+  const handleAnalyze = async () => {
+    if (!fileContent || analyzing || !engineReady) return;
     setAnalyzing(true);
-    workerRef.current.postMessage({ type: "analyze", payload: { text: fileContent, entities } });
+    try {
+      const raw = await invoke<Match[]>("analyze_text", { text: fileContent, entities, threshold });
+      // Konvertera UTF-8 byte-offset → JS char-index (åäö = 2 bytes, 1 char)
+      const result = fixByteOffsets(fileContent, raw);
+      setMatches(result.sort((a, b) => a.start - b.start));
+      setIgnoredKeys(new Set());
+    } catch (err) {
+      alert("Fel vid analys: " + String(err));
+    } finally {
+      setNerProgress(null);
+      setAnalyzing(false);
+    }
   };
 
   const toggleIgnored = useCallback((key: string) => {
@@ -213,14 +259,13 @@ export default function App() {
     return elements;
   }, [fileContent, matches, ignoredKeys, activeTranslationTable, toggleIgnored]);
 
-  const handleSave = () => {
+  const handleSave = async () => {
     const posToLabel = new Map<number, string>();
     for (const entry of activeTranslationTable.values()) {
       for (const pos of entry.positions) {
         posToLabel.set(pos.start, entry.maskedLabel);
       }
     }
-
     const sortedDesc = [...activeMatches].sort((a, b) => b.start - a.start);
     const segments: string[] = [];
     let cursor = fileContent.length;
@@ -230,24 +275,22 @@ export default function App() {
       cursor = m.start;
     }
     segments.push(fileContent.slice(0, cursor));
-    downloadBlob(segments.reverse().join(""), "text/plain", fileName.replace(".txt", "_maskerad.txt"));
+    await saveTextFile(segments.reverse().join(""), fileName.replace(".txt", "_maskerad.txt"));
   };
 
-  const handleExportJSON = () => {
-    downloadBlob(
+  const handleExportJSON = async () => {
+    await saveJsonFile(
       JSON.stringify([...activeTranslationTable.values()], null, 2),
-      "application/json",
       fileName.replace(".txt", "_oversattning.json")
     );
   };
 
-  const handleExportTXT = () => {
+  const handleExportTXT = async () => {
     const rows = [...activeTranslationTable.values()]
       .map((e) => `${e.maskedLabel}\t${e.originalText}\t${e.count}`)
       .join("\n");
-    downloadBlob(
+    await saveTextFile(
       "Maskerat label\tOriginalvärde\tFörekomster\n" + rows,
-      "text/plain",
       fileName.replace(".txt", "_oversattning.txt")
     );
   };
@@ -274,7 +317,43 @@ export default function App() {
       <header className="header">
         <Shield size={36} color="#818cf8" />
         <h1>Maskera</h1>
+        <button
+          onClick={() => setShowSettings(v => !v)}
+          title="Inställningar"
+          style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer", padding: "0.25rem", color: showSettings ? "#818cf8" : "#64748b" }}
+        >
+          <Settings size={20} />
+        </button>
       </header>
+
+      {/* Inställningspanel */}
+      {showSettings && (
+        <div style={{
+          background: "#1e293b", borderBottom: "1px solid #334155",
+          padding: "0.75rem 1.5rem", display: "flex", alignItems: "center", gap: "1.5rem",
+          fontSize: "0.82rem", color: "#94a3b8",
+        }}>
+          <span style={{ fontWeight: 600, color: "#cbd5e1" }}>AI-inställningar</span>
+          <label style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+            <span>Konfidenströskel</span>
+            <input
+              type="range" min={0.30} max={0.95} step={0.05}
+              value={threshold}
+              onChange={e => setThreshold(parseFloat(e.target.value))}
+              style={{ width: "120px", accentColor: "#818cf8" }}
+            />
+            <span style={{
+              minWidth: "3rem", textAlign: "center", fontWeight: 600,
+              color: threshold < 0.45 ? "#f59e0b" : threshold > 0.80 ? "#10b981" : "#818cf8",
+            }}>
+              {Math.round(threshold * 100)}%
+            </span>
+          </label>
+          <span style={{ fontSize: "0.72rem", color: "#475569", maxWidth: "360px" }}>
+            Lägre = fler träffar (risk för falska positiv) · Högre = färre men säkrare träffar
+          </span>
+        </div>
+      )}
 
       <div className="dashboard">
         {/* Vänsterpanel */}
@@ -369,10 +448,55 @@ export default function App() {
           >
             {analyzing ? "Skannar text..." : "Granska Text"}
           </button>
-          {!engineReady && (
-            <p style={{ fontSize: "0.75rem", color: "#64748b", margin: 0, textAlign: "center" }}>
-              {loadProgress > 0 ? `Laddar AI-modell... ${loadProgress}%` : "Initierar AI-modell..."}
-            </p>
+
+          {/* Progress-bar visas under analys */}
+          {analyzing && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+              <div style={{
+                width: "100%", height: "6px", borderRadius: "3px",
+                backgroundColor: "#1e293b", overflow: "hidden",
+              }}>
+                <div style={{
+                  height: "100%", borderRadius: "3px",
+                  backgroundColor: "#818cf8",
+                  width: nerProgress
+                    ? `${Math.round((nerProgress.chunk / nerProgress.total) * 100)}%`
+                    : "5%",
+                  transition: "width 0.3s ease",
+                }} />
+              </div>
+              <p style={{ fontSize: "0.72rem", color: "#64748b", margin: 0, textAlign: "center" }}>
+                {nerProgress
+                  ? `Block ${nerProgress.chunk} / ${nerProgress.total} (${Math.round((nerProgress.chunk / nerProgress.total) * 100)}%)`
+                  : "Förbereder analys..."}
+              </p>
+            </div>
+          )}
+
+          {!engineReady && !analyzing && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+              {downloadProgress ? (
+                <>
+                  <div style={{ width: "100%", height: "6px", borderRadius: "3px", backgroundColor: "#1e293b", overflow: "hidden" }}>
+                    <div style={{
+                      height: "100%", borderRadius: "3px", backgroundColor: "#06b6d4",
+                      width: downloadProgress.total > 0
+                        ? `${Math.round((downloadProgress.downloaded / downloadProgress.total) * 100)}%`
+                        : "100%",
+                      transition: "width 0.2s ease",
+                    }} />
+                  </div>
+                  <p style={{ fontSize: "0.72rem", color: "#64748b", margin: 0, textAlign: "center" }}>
+                    {`Laddar ner ${downloadProgress.file} — ${(downloadProgress.downloaded / 1_048_576).toFixed(1)} MB`}
+                    {downloadProgress.total > 0 && ` / ${(downloadProgress.total / 1_048_576).toFixed(0)} MB`}
+                  </p>
+                </>
+              ) : (
+                <p style={{ fontSize: "0.75rem", color: "#64748b", margin: 0, textAlign: "center" }}>
+                  Laddar AI-modell...
+                </p>
+              )}
+            </div>
           )}
         </div>
 

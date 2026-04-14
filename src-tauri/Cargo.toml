@@ -1,6 +1,6 @@
 [package]
 name = "maskera"
-version = "0.3.1"
+version = "0.4.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -23,4 +23,16 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-shell = "2"
+# NER-inferens native i Rust — eliminerar WASM OOM
+tract-onnx = "0.21"
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex", "progressbar"] }
+ndarray = "0.16"
+regex = "1"
+tauri-plugin-dialog = "2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
+# ── Dev-profil: optimera dependencies med O3 även i debug-bygget ──────────────
+# Utan detta är tract-onnx ~20x långsammare (ingen SIMD, ingen inlining).
+# Din egen kod förblir ooptimerad (snabba rebuilds).
+[profile.dev.package."*"]
+opt-level = 3
