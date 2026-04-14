@@ -8,9 +8,9 @@ Maskera är ett lokalt verktyg för automatisk identifiering och maskering av pe
 
 Ladda upp en `.txt`-fil, välj vilka entitetstyper som ska sökas, och låt verktyget:
 
-1. **Identifiera** personuppgifter med regelbaserad sökning (regex) och AI direkt i webbläsaren
+1. **Identifiera** personuppgifter med regelbaserad sökning (regex) och AI (BERT NER)
 2. **Markera** träffarna i texten med färgkodning per kategori
-3. **Granska** och justera — avmarkera felaktiga träffar eller lägg till missade ord manuellt
+3. **Granska** och justera — avmarkera felaktiga träffar eller lägg till ord manuellt
 4. **Exportera** en maskerad version av texten samt en översättningstabell
 
 ### Vad detekteras?
@@ -35,21 +35,28 @@ Regex-kategorier körs alltid. AI-kategorier kan slås av/på individuellt.
 
 ```
 Tauri-app (Rust-shell + WebView)
-  └── React-gränssnitt
-        └── Web Worker
-              ├── Regex-pass (personnummer, e-post, telefon) — alltid
-              └── Transformers.js → ONNX-modell (KBLab BERT NER)
-                    └── Körs lokalt i webbläsaren — ingen server behövs
+  └── React-gränssnitt (TypeScript)
+        └── Tauri-kommandon (invoke)
+              ├── Regex-pass (personnummer, e-post, telefon) — Rust
+              └── BERT NER — tract-onnx i Rust
+                    ├── Modell laddas ner från HuggingFace vid första start
+                    ├── Cachas i app-datakatalogen (aldrig bundlad i appen)
+                    └── Körs helt lokalt — ingen server behövs
 ```
 
 ### Analysflödet
 
-1. **Regex-pass** — tre mönster för personnummer, e-post och telefonnummer
-2. **BERT NER** — texten delas i 1 500-teckens chunk för att hålla sig under BERT:s 512-tokengräns; varje chunk analyseras av ONNX-modellen via Transformers.js
-3. **Manuell aggregering** — råa token-prediktioner grupperas till hela namnentiteter med exakta teckenpositioner
-4. **Deduplicering** — överlappande träffar filtreras bort
-5. **Granskning** — användaren kan klicka för att ignorera träffar, eller lägga till egna
-6. **Maskering** — aktiva träffar ersätts med etiketter som `[PERSON A]`, `[PERSONNUMMER 1]`
+1. **Regex-pass** — tre mönster för personnummer, e-post och telefonnummer (Rust)
+2. **BERT NER** — texten delas i 1 200-teckens chunks (med 80-teckens överlapp); varje chunk analyseras av ONNX-modellen via `tract-onnx`
+3. **Ord-aggregering** — tokenizerns `word_ids` används för att gruppera subword-tokens till hela ord, undviker att delar av sammansatta ord felidentifieras som entiteter
+4. **Konfidenströskel** — tokens med för svag modellsäkerhet filtreras bort (justerbar i inställningar)
+5. **Deduplicering** — överlappande träffar från olika chunks filtreras bort
+6. **Granskning** — användaren kan klicka för att ignorera träffar, eller lägga till egna
+7. **Maskering** — aktiva träffar ersätts med etiketter som `[PERSON A]`, `[PERSONNUMMER 1]`
+
+### Inställningar
+
+Klicka på kugghjulet (⚙) i övre högra hörnet för att justera **konfidenströskel** (30–95 %). Lägre värde ger fler träffar men fler falska positiv; högre värde ger färre men säkrare träffar. Standardvärde: 60 %.
 
 ### Översättningstabellen
 
@@ -61,9 +68,9 @@ Tabellen kan exporteras som JSON eller tab-separerad TXT.
 
 ### Modell
 
-AI-modellen ([KBLab/bert-base-swedish-cased-ner](https://huggingface.co/KBLab/bert-base-swedish-cased-ner)) är konverterad till ONNX-format och finns på HuggingFace: [psvensk/bert-base-swedish-cased-ner-onnx](https://huggingface.co/psvensk/bert-base-swedish-cased-ner-onnx).
+AI-modellen ([KBLab/bert-base-swedish-cased-ner](https://huggingface.co/KBLab/bert-base-swedish-cased-ner)) är kvantiserad till ONNX int8-format och publicerad på HuggingFace: [psvensk/bert-base-swedish-cased-ner-onnx](https://huggingface.co/psvensk/bert-base-swedish-cased-ner-onnx).
 
-Modellen (~120 MB, kvantiserad int8) laddas ner automatiskt vid första körning och cachas i webbläsarens lokala lagring.
+Modellen (~120 MB) laddas ner automatiskt vid första start och cachas i appens datakatalog. Nedladdningen visas med en progress-bar i gränssnittet.
 
 ---
 
@@ -72,7 +79,9 @@ Modellen (~120 MB, kvantiserad int8) laddas ner automatiskt vid första körning
 | Lager | Teknologi |
 |---|---|
 | AI-modell | [KBLab/bert-base-swedish-cased-ner](https://huggingface.co/KBLab/bert-base-swedish-cased-ner) — svensk BERT tränad på NER |
-| ML i webbläsaren | [Transformers.js](https://huggingface.co/docs/transformers.js) + ONNX Runtime WebAssembly |
+| ML-inferens | [tract-onnx](https://github.com/sonos/tract) — native Rust ONNX-körning, fullt systemminne |
+| Tokenisering | [HuggingFace tokenizers](https://github.com/huggingface/tokenizers) (Rust) |
+| HTTP-nedladdning | [reqwest](https://github.com/seanmonstar/reqwest) med rustls-TLS |
 | Gränssnitt | React 19 + TypeScript |
 | Desktop-shell | [Tauri 2](https://tauri.app) (Rust) — ~5 MB binär |
 | CI/CD | GitHub Actions — automatiskt Windows-bygge vid push till `main` |
@@ -88,7 +97,7 @@ npm install
 npm run tauri dev
 ```
 
-Tauri-fönstret öppnas automatiskt. Första gången laddas ONNX-modellen ner (~120 MB).
+Tauri-fönstret öppnas. Första gången laddas ONNX-modellen ner från HuggingFace (~120 MB) — detta sker med progress-bar i appen.
 
 ## Bygga fristående app
 
@@ -105,4 +114,4 @@ npm run tauri build
 
 ## Releases
 
-Färdigbyggda Windows-versioner finns under [Releases](../../releases). Ladda ner installationsfilen och kör.
+Färdigbyggda Windows-versioner finns under [Releases](../../releases). Ladda ner installationsfilen och kör — modellen laddas ner automatiskt vid första start.
