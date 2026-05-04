@@ -70,7 +70,16 @@ Tabellen kan exporteras som JSON eller tab-separerad TXT.
 
 AI-modellen ([KBLab/bert-base-swedish-cased-ner](https://huggingface.co/KBLab/bert-base-swedish-cased-ner)) är kvantiserad till ONNX int8-format och publicerad på HuggingFace: [psvensk/bert-base-swedish-cased-ner-onnx](https://huggingface.co/psvensk/bert-base-swedish-cased-ner-onnx).
 
-Modellen (~120 MB) laddas ner automatiskt vid första start och cachas i appens datakatalog. Nedladdningen visas med en progress-bar i gränssnittet.
+Modellfilerna (~120 MB totalt) laddas ner automatiskt vid första start via Rust async streaming och cachas i appens datakatalog. Nedladdningen visas med en progress-bar i gränssnittet. Vid eventuella nätverksproblem finns ett manuellt alternativ — se nedan.
+
+### Nätverksbegränsade miljöer (företagsproxy)
+
+Om automatisk nedladdning misslyckas (t.ex. brandvägg eller intern proxy) kan modellfilerna laddas ner manuellt:
+
+1. Ladda ner alla filer från [HuggingFace](https://huggingface.co/psvensk/bert-base-swedish-cased-ner-onnx) och spara dem i en lokal mapp
+2. Klicka på **Välj modellmapp manuellt** i appen och peka på den mappen
+
+Filer som krävs: `model_quantized.onnx`, `tokenizer.json`, `tokenizer_config.json`, `special_tokens_map.json`, `config.json`
 
 ---
 
@@ -81,7 +90,7 @@ Modellen (~120 MB) laddas ner automatiskt vid första start och cachas i appens 
 | AI-modell | [KBLab/bert-base-swedish-cased-ner](https://huggingface.co/KBLab/bert-base-swedish-cased-ner) — svensk BERT tränad på NER |
 | ML-inferens | [tract-onnx](https://github.com/sonos/tract) — native Rust ONNX-körning, fullt systemminne |
 | Tokenisering | [HuggingFace tokenizers](https://github.com/huggingface/tokenizers) (Rust) |
-| HTTP-nedladdning | [reqwest](https://github.com/seanmonstar/reqwest) med rustls-TLS |
+| HTTP-nedladdning | [reqwest](https://github.com/seanmonstar/reqwest) — async streaming med native-TLS (respekterar OS-certifikat och systemproxy) |
 | Gränssnitt | React 19 + TypeScript |
 | Desktop-shell | [Tauri 2](https://tauri.app) (Rust) — ~5 MB binär |
 | CI/CD | GitHub Actions — automatiskt Windows-bygge vid push till `main` |
