@@ -106,6 +106,19 @@ export default function App() {
   const [modelStatus, setModelStatus] = useState<string>("Laddar AI-modell…");
   const [showSettings, setShowSettings] = useState(false);
   const [threshold, setThreshold] = useState(0.60);
+  const [phase, setPhase] = useState<"modell" | "analys" | "klar" | null>("modell");
+
+  // Härled status-bandets fas från app-state
+  useEffect(() => {
+    if (!engineReady) { setPhase("modell"); return; }
+    if (analyzing)    { setPhase("analys"); return; }
+    if (matches.length > 0) {
+      setPhase("klar");
+      const t = setTimeout(() => setPhase(null), 4000);
+      return () => clearTimeout(t);
+    }
+    setPhase(null);
+  }, [engineReady, analyzing, matches.length]);
 
   useEffect(() => {
     // Registrera lyssnare INNAN invoke — annars kan model_ready emitteras
@@ -319,7 +332,7 @@ export default function App() {
   return (
     <div className="app-container">
       <header className="header">
-        <Shield size={36} color="#818cf8" />
+        <Shield size={30} color="#818cf8" />
         <h1>Maskera</h1>
         <button
           onClick={() => setShowSettings(v => !v)}
@@ -358,6 +371,84 @@ export default function App() {
           </span>
         </div>
       )}
+
+      {/* Statusband — visas vid aktivitet (modellnedladdning, analys, eller kort efter klar) */}
+      {phase && (() => {
+        const phaseColor = phase === "modell" ? "#06b6d4" : phase === "analys" ? "#818cf8" : "#10b981";
+        let progressPct = 0;
+        let label = "";
+        if (phase === "modell") {
+          if (downloadProgress && downloadProgress.total > 0) {
+            progressPct = (downloadProgress.downloaded / downloadProgress.total) * 100;
+            label = `Laddar ner ${downloadProgress.file} — ${(downloadProgress.downloaded / 1_048_576).toFixed(1)} MB / ${(downloadProgress.total / 1_048_576).toFixed(0)} MB`;
+          } else {
+            progressPct = downloadProgress ? 50 : 15;
+            label = modelStatus;
+          }
+        } else if (phase === "analys") {
+          if (nerProgress) {
+            progressPct = (nerProgress.chunk / nerProgress.total) * 100;
+            label = `Analyserar — Block ${nerProgress.chunk} / ${nerProgress.total} (${Math.round(progressPct)}%)`;
+          } else {
+            progressPct = 5;
+            label = "Förbereder analys…";
+          }
+        } else {
+          progressPct = 100;
+          label = `Klar — ${activeMatches.length} träffar hittade`;
+        }
+        const stepState = (target: "modell" | "analys" | "klar") => {
+          if (phase === target) return "active";
+          if (target === "modell" && phase !== "modell") return "done";
+          if (target === "analys" && phase === "klar")   return "done";
+          return "idle";
+        };
+        return (
+          <div className="status-band">
+            <div className="status-steps">
+              <div className={`status-step ${stepState("modell")}`}>
+                <div className="status-step-dot">1</div>
+                <span>Modell</span>
+              </div>
+              <div className={`status-step-line ${phase !== "modell" ? "done" : ""}`} />
+              <div className={`status-step ${stepState("analys")}`}>
+                <div className="status-step-dot">2</div>
+                <span>Analys</span>
+              </div>
+              <div className={`status-step-line ${phase === "klar" ? "done" : ""}`} />
+              <div className={`status-step ${stepState("klar")}`}>
+                <div className="status-step-dot">3</div>
+                <span>Klar</span>
+              </div>
+            </div>
+            <div className="status-detail">
+              <div className="status-progress-bar">
+                <div className="status-progress-fill" style={{ width: `${progressPct}%`, backgroundColor: phaseColor }} />
+              </div>
+              <span className="status-label">{label}</span>
+            </div>
+            {phase === "modell" && (
+              <div className="status-fallback">
+                <span>Problem med nedladdning?</span>
+                <button
+                  onClick={async () => {
+                    const dir = await open({ directory: true, title: "Välj mapp med modellfiler" });
+                    if (!dir) return;
+                    const path = Array.isArray(dir) ? dir[0] : dir;
+                    invoke("load_model_from_dir", { srcDir: path })
+                      .catch((e) => alert("Fel vid manuell laddning: " + String(e)));
+                  }}
+                >
+                  Välj modellmapp manuellt
+                </button>
+                <a onClick={() => openUrl("https://huggingface.co/psvensk/bert-base-swedish-cased-ner-onnx")}>
+                  Ladda ner från HuggingFace
+                </a>
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       <div className="dashboard">
         {/* Vänsterpanel */}
@@ -452,86 +543,6 @@ export default function App() {
           >
             {analyzing ? "Skannar text..." : "Granska Text"}
           </button>
-
-          {/* Progress-bar visas under analys */}
-          {analyzing && (
-            <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
-              <div style={{
-                width: "100%", height: "6px", borderRadius: "3px",
-                backgroundColor: "#1e293b", overflow: "hidden",
-              }}>
-                <div style={{
-                  height: "100%", borderRadius: "3px",
-                  backgroundColor: "#818cf8",
-                  width: nerProgress
-                    ? `${Math.round((nerProgress.chunk / nerProgress.total) * 100)}%`
-                    : "5%",
-                  transition: "width 0.3s ease",
-                }} />
-              </div>
-              <p style={{ fontSize: "0.72rem", color: "#64748b", margin: 0, textAlign: "center" }}>
-                {nerProgress
-                  ? `Block ${nerProgress.chunk} / ${nerProgress.total} (${Math.round((nerProgress.chunk / nerProgress.total) * 100)}%)`
-                  : "Förbereder analys..."}
-              </p>
-            </div>
-          )}
-
-          {!engineReady && !analyzing && (
-            <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
-              {downloadProgress ? (
-                <>
-                  <div style={{ width: "100%", height: "6px", borderRadius: "3px", backgroundColor: "#1e293b", overflow: "hidden" }}>
-                    <div style={{
-                      height: "100%", borderRadius: "3px", backgroundColor: "#06b6d4",
-                      width: downloadProgress.total > 0
-                        ? `${Math.round((downloadProgress.downloaded / downloadProgress.total) * 100)}%`
-                        : "100%",
-                      transition: "width 0.2s ease",
-                    }} />
-                  </div>
-                  <p style={{ fontSize: "0.72rem", color: "#64748b", margin: 0, textAlign: "center" }}>
-                    {`Laddar ner ${downloadProgress.file} — ${(downloadProgress.downloaded / 1_048_576).toFixed(1)} MB`}
-                    {downloadProgress.total > 0 && ` / ${(downloadProgress.total / 1_048_576).toFixed(0)} MB`}
-                  </p>
-                </>
-              ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem", alignItems: "center" }}>
-                  <p style={{ fontSize: "0.75rem", color: "#64748b", margin: 0, textAlign: "center" }}>
-                    {modelStatus}
-                  </p>
-                  <button
-                    style={{
-                      fontSize: "0.7rem", color: "#475569", background: "none",
-                      border: "1px solid #334155", borderRadius: "4px",
-                      padding: "0.2rem 0.6rem", cursor: "pointer",
-                    }}
-                    onClick={async () => {
-                      const dir = await open({ directory: true, title: "Välj mapp med modellfiler" });
-                      if (!dir) return;
-                      const path = Array.isArray(dir) ? dir[0] : dir;
-                      invoke("load_model_from_dir", { srcDir: path })
-                        .catch((e) => alert("Fel vid manuell laddning: " + String(e)));
-                    }}
-                    title="Ladda ner modellfilerna manuellt via webbläsaren och peka hit"
-                  >
-                    Välj modellmapp manuellt
-                  </button>
-                  <p style={{ fontSize: "0.65rem", color: "#334155", margin: 0, textAlign: "center" }}>
-                    Ladda ner från{" "}
-                    <a
-                      href="#"
-                      style={{ color: "#818cf8" }}
-                      onClick={(e) => { e.preventDefault(); openUrl("https://huggingface.co/psvensk/bert-base-swedish-cased-ner-onnx"); }}
-                    >
-                      HuggingFace
-                    </a>
-                    {" "}och välj mappen
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
         </div>
 
         {/* Textvisare */}
