@@ -58,8 +58,10 @@ pub fn load_tokenizer(tokenizer_path: &Path) -> Result<Tokenizer, String> {
 
 // ── Chunking ──────────────────────────────────────────────────────────────────
 
-const CHUNK_CHARS: usize = 1200;  // Ökad från 800 → 33% färre chunks
-const OVERLAP: usize = 80;
+const CHUNK_CHARS: usize = 1200;
+// 200 tecken ger marginal för att svenska sammansatta namn (t.ex. "Anna-Karin
+// Andersson") inte ska klippas mellan chunks. Kostnad: ~17% fler chunks.
+const OVERLAP: usize = 200;
 
 fn chunk_text(text: &str) -> Vec<(String, usize)> {
     let chars: Vec<char> = text.chars().collect();
@@ -146,10 +148,11 @@ fn run_chunk(
     // etiketten Person (så att det är ett komplett ord som markeras).
     // BTreeMap håller orden i textordning (stigande word_id).
     //
-    // (usize, usize, Option<&'static str>) = (byte_start, byte_end, label)
-    let mut word_map: BTreeMap<u32, (usize, usize, Option<&'static str>)> = BTreeMap::new();
-
-    // Tröskeln skickas in som parameter från frontend (inställningar-panel).
+    // word_map: word_id → (byte_start, byte_end, best_label, best_prob)
+    // Weighted voting: token med högst confidence inom ett ord bestämmer etiketten.
+    // Tidigare vann "första entity-tokenen" oavsett konfidens, vilket gav fel
+    // etikett när första token var osäker men senare token var stark.
+    let mut word_map: BTreeMap<u32, (usize, usize, Option<&'static str>, f32)> = BTreeMap::new();
 
     for (tok_i, offset) in offsets.iter().enumerate() {
         let Some(word_id) = word_ids[tok_i] else { continue }; // hoppa [CLS]/[SEP]
@@ -161,26 +164,27 @@ fn run_chunk(
             let v = logits[[0, tok_i, l]];
             if v > best_val { best_val = v; best_id = l; }
         }
-        // Numeriskt stabilt softmax (subtrahera max för att undvika overflow)
         let exp_vals: Vec<f32> = (0..num_labels)
             .map(|l| (logits[[0, tok_i, l]] - best_val).exp())
             .collect();
         let sum_exp: f32 = exp_vals.iter().sum();
         let best_prob = exp_vals[best_id] / sum_exp;
 
-        // Klassificera bara som entitet om modellen är tillräckligt säker
         let ui_label = if best_id == 0 || best_prob < threshold {
             None
         } else {
             id_to_ui(best_id, requested)
         };
 
-        let entry = word_map.entry(word_id).or_insert((offset.0, offset.1, None));
+        let entry = word_map.entry(word_id).or_insert((offset.0, offset.1, None, 0.0));
         if offset.0 < entry.0 { entry.0 = offset.0; }
         if offset.1 > entry.1 { entry.1 = offset.1; }
-        // Första entity-klassificerade token i ordet vinner etiketten
-        if ui_label.is_some() && entry.2.is_none() {
-            entry.2 = ui_label;
+        // Behåll etikett med högst confidence
+        if let Some(lbl) = ui_label {
+            if best_prob > entry.3 {
+                entry.2 = Some(lbl);
+                entry.3 = best_prob;
+            }
         }
     }
 
@@ -208,7 +212,7 @@ fn run_chunk(
         }
     };
 
-    for &(tok_start, tok_end, ui_label) in word_map.values() {
+    for &(tok_start, tok_end, ui_label, _prob) in word_map.values() {
         match (ui_label, &current) {
             (Some(lbl), Some(cur)) if lbl == cur.2 => {
                 let gap = tok_start.saturating_sub(cur.1);
@@ -240,6 +244,13 @@ fn run_chunk(
 // ── Deduplicering ─────────────────────────────────────────────────────────────
 
 fn deduplicate(mut matches: Vec<Match>) -> Vec<Match> {
+    // Steg 1: filtrera bort exakta dubbletter (samma start, end och label).
+    // Två overlappande chunks kan annars ge identisk träff två gånger med
+    // olika etiketter på samma span — tidigare släpptes båda igenom.
+    let mut seen = std::collections::HashSet::new();
+    matches.retain(|m| seen.insert((m.start, m.end, m.label.clone())));
+
+    // Steg 2: sortera och behåll bara icke-överlappande träffar (första vinner).
     matches.sort_by_key(|m| m.start);
     let mut result: Vec<Match> = Vec::new();
     let mut last_end = 0usize;

@@ -227,8 +227,13 @@ async fn analyze_text(
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<Vec<Match>, String> {
         let mut results = run_regex(&text, &entities);
+        // Regex-kategorier ska inte skickas till NER-pipelinen
+        let regex_only = [
+            "Personnummer", "E-post", "Telefonnummer",
+            "Org.nummer", "Konto/Giro", "IP-adress", "Kortnummer",
+        ];
         let ner_entities: Vec<String> = entities.iter()
-            .filter(|e| !["Personnummer", "E-post", "Telefonnummer"].iter().any(|r| r == e))
+            .filter(|e| !regex_only.iter().any(|r| r == e))
             .cloned().collect();
         if !ner_entities.is_empty() {
             let model     = SESSION.get().ok_or("Modell ej laddad")?;
@@ -245,27 +250,143 @@ async fn analyze_text(
     .map_err(|e| format!("spawn_blocking-fel: {e}"))?
 }
 
+/// Luhn-algoritmen — validerar kreditkortsnummer. Returnerar false för
+/// sekvenser med fel längd eller fel kontrollsiffra.
+fn luhn_valid(s: &str) -> bool {
+    let nums: Vec<u32> = s.chars()
+        .filter(|c| c.is_ascii_digit())
+        .map(|c| c.to_digit(10).unwrap())
+        .collect();
+    if nums.len() < 13 || nums.len() > 19 { return false; }
+    let sum: u32 = nums.iter().rev().enumerate().map(|(i, &d)| {
+        if i % 2 == 1 {
+            let x = d * 2;
+            if x > 9 { x - 9 } else { x }
+        } else { d }
+    }).sum();
+    sum % 10 == 0
+}
+
 fn run_regex(text: &str, requested: &[String]) -> Vec<Match> {
     let mut matches = Vec::new();
+
+    // ── Personnummer (10 eller 12 siffror, med valfri separator) ──
     if requested.iter().any(|e| e == "Personnummer") {
         let re = regex::Regex::new(r"(?x)\b(?:\d{2})?\d{6}[-+]?\d{4}\b").unwrap();
         for m in re.find_iter(text) {
             matches.push(Match { text: m.as_str().to_string(), label: "Personnummer".to_string(), start: m.start(), end: m.end(), source: "regex".to_string() });
         }
     }
+
+    // ── E-post ──
     if requested.iter().any(|e| e == "E-post") {
         let re = regex::Regex::new(r"(?i)\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b").unwrap();
         for m in re.find_iter(text) {
             matches.push(Match { text: m.as_str().to_string(), label: "E-post".to_string(), start: m.start(), end: m.end(), source: "regex".to_string() });
         }
     }
+
+    // ── Telefonnummer — tillåt mellanslag/bindestreck mellan grupper ──
+    // Tidigare regex missade ~80% av vanliga svenska format som "+46 8 123 45 67".
     if requested.iter().any(|e| e == "Telefonnummer") {
-        let re = regex::Regex::new(r"(?:(?:0|\+46|0046)\s?(?:[1-9]\d{1,2}\s?(?:[- ]?\d{2,3}){1,3}|\d{2,3}\s?(?:[- ]?\d{2,3}){1,3}))").unwrap();
+        let re = regex::Regex::new(
+            r"(?x)
+            (?:\+46|0046|0)
+            [\s\-]?
+            [1-9]\d{0,2}
+            (?:[\s\-]?\d{2,4}){2,4}
+            "
+        ).unwrap();
         for m in re.find_iter(text) {
             let s = m.as_str().trim_end();
             matches.push(Match { text: s.to_string(), label: "Telefonnummer".to_string(), start: m.start(), end: m.start() + s.len(), source: "regex".to_string() });
         }
     }
+
+    // ── Organisationsnummer (XXXXXX-XXXX) ──
+    // Negativ lookahead skulle behövas för att filtrera bort 12-siffriga personnummer
+    // men Rust regex stöder inte lookahead — vi filtrerar bort kollisioner senare.
+    if requested.iter().any(|e| e == "Org.nummer") {
+        let re = regex::Regex::new(r"\b\d{6}-\d{4}\b").unwrap();
+        for m in re.find_iter(text) {
+            let s = m.as_str();
+            // Hoppa över om det överlappar med ett redan funnit personnummer
+            if matches.iter().any(|x| x.label == "Personnummer" && x.start <= m.start() && m.end() <= x.end) {
+                continue;
+            }
+            matches.push(Match { text: s.to_string(), label: "Org.nummer".to_string(), start: m.start(), end: m.end(), source: "regex".to_string() });
+        }
+    }
+
+    // ── IBAN / Bankgiro / Plusgiro ──
+    if requested.iter().any(|e| e == "Konto/Giro") {
+        // IBAN SE-format
+        let iban = regex::Regex::new(r"\bSE\d{2}[0-9A-Z]{20}\b").unwrap();
+        for m in iban.find_iter(text) {
+            matches.push(Match { text: m.as_str().to_string(), label: "Konto/Giro".to_string(), start: m.start(), end: m.end(), source: "regex".to_string() });
+        }
+        // Bankgiro: 3-4 + 4 siffror (separator bindestreck eller mellanslag)
+        let bg = regex::Regex::new(r"\b\d{3,4}[\s\-]\d{4}\b").unwrap();
+        for m in bg.find_iter(text) {
+            // Undvik krock med Personnummer, Telefon och redan funnen IBAN
+            if matches.iter().any(|x|
+                (x.label == "Personnummer" || x.label == "Telefonnummer" || x.label == "Konto/Giro")
+                && !(m.end() <= x.start || m.start() >= x.end)
+            ) { continue; }
+            matches.push(Match { text: m.as_str().to_string(), label: "Konto/Giro".to_string(), start: m.start(), end: m.end(), source: "regex".to_string() });
+        }
+        // Plusgiro: 1-7 siffror + bindestreck + kontrollsiffra
+        let pg = regex::Regex::new(r"\b\d{1,7}-\d\b").unwrap();
+        for m in pg.find_iter(text) {
+            // Längd minst 3 tecken (annars för många falska träffar t.ex. "1-2")
+            if m.end() - m.start() < 3 { continue; }
+            if matches.iter().any(|x|
+                (x.label == "Personnummer" || x.label == "Telefonnummer" || x.label == "Konto/Giro" || x.label == "Org.nummer")
+                && !(m.end() <= x.start || m.start() >= x.end)
+            ) { continue; }
+            matches.push(Match { text: m.as_str().to_string(), label: "Konto/Giro".to_string(), start: m.start(), end: m.end(), source: "regex".to_string() });
+        }
+    }
+
+    // ── IPv4-adresser (publika) ──
+    if requested.iter().any(|e| e == "IP-adress") {
+        let re = regex::Regex::new(
+            r"\b(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}\b"
+        ).unwrap();
+        for m in re.find_iter(text) {
+            let s = m.as_str();
+            // Filtrera bort privata och loopback-nät
+            let is_private =
+                s.starts_with("10.") ||
+                s.starts_with("127.") ||
+                s.starts_with("192.168.") ||
+                {
+                    if let Some(rest) = s.strip_prefix("172.") {
+                        rest.split('.').next()
+                            .and_then(|n| n.parse::<u32>().ok())
+                            .map_or(false, |n| (16..=31).contains(&n))
+                    } else { false }
+                };
+            if is_private { continue; }
+            matches.push(Match { text: s.to_string(), label: "IP-adress".to_string(), start: m.start(), end: m.end(), source: "regex".to_string() });
+        }
+    }
+
+    // ── Kreditkortsnummer (med Luhn-validering) ──
+    if requested.iter().any(|e| e == "Kortnummer") {
+        // Kandidatmönster: 13-19 siffror med valfri separator
+        let re = regex::Regex::new(r"\b\d(?:[\s\-]?\d){12,18}\b").unwrap();
+        for m in re.find_iter(text) {
+            let s = m.as_str();
+            if !luhn_valid(s) { continue; }
+            // Undvik krock med Personnummer/Telefon/Bankgiro
+            if matches.iter().any(|x|
+                !(m.end() <= x.start || m.start() >= x.end)
+            ) { continue; }
+            matches.push(Match { text: s.to_string(), label: "Kortnummer".to_string(), start: m.start(), end: m.end(), source: "regex".to_string() });
+        }
+    }
+
     matches
 }
 

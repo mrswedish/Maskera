@@ -8,14 +8,25 @@ import "./index.css";
 import type { Match } from "./types";
 import { buildTranslationTable } from "./translationUtils";
 
-const REGEX_LABELS = ["Personnummer", "E-post", "Telefonnummer"] as const;
+const REGEX_LABELS = [
+  "Personnummer", "E-post", "Telefonnummer",
+  "Org.nummer", "Konto/Giro", "IP-adress", "Kortnummer",
+] as const;
 const ENTITY_LABELS = ["Person", "Organisation", "Plats", "Övrigt", "Tid", "Händelse"] as const;
-const DEFAULT_ENTITIES = [...REGEX_LABELS, "Person", "Organisation", "Plats", "Övrigt"];
+const DEFAULT_ENTITIES = [
+  "Personnummer", "E-post", "Telefonnummer",
+  "Org.nummer", "Konto/Giro", "Kortnummer",
+  "Person", "Organisation", "Plats", "Övrigt",
+];
 
 const COLORS: Record<string, string> = {
   Personnummer: "#ef4444",
   "E-post": "#3b82f6",
   Telefonnummer: "#f59e0b",
+  "Org.nummer": "#a855f7",
+  "Konto/Giro": "#f472b6",
+  "IP-adress": "#0ea5e9",
+  Kortnummer: "#dc2626",
   Person: "#8b5cf6",
   Organisation: "#10b981",
   Plats: "#ec4899",
@@ -44,18 +55,20 @@ function fixMojibake(text: string): string {
 /**
  * Rust returnerar byte-offset i UTF-8. JS string.slice() vill ha
  * teckenindex (UTF-16 code units). Konverterar alla match-positioner.
+ *
+ * Bygger en komplett byte→char-map för ALLA byte-positioner. Tidigare
+ * lagrades bara "needed"-positioner — om Rust returnerade en offset som
+ * inte träffade setet exakt föll koden tillbaka på byte-värdet som
+ * char-index (fel för text med åäö → felaktiga markeringar).
  */
 function fixByteOffsets(text: string, rawMatches: Match[]): Match[] {
   if (rawMatches.length === 0) return rawMatches;
   const bytes = new TextEncoder().encode(text);
-  // Samla alla byte-positioner vi behöver slå upp
-  const needed = new Set<number>();
-  for (const m of rawMatches) { needed.add(m.start); needed.add(m.end); }
   const byteToChar = new Map<number, number>();
   let charIdx = 0;
   let byteIdx = 0;
   while (byteIdx <= bytes.length) {
-    if (needed.has(byteIdx)) byteToChar.set(byteIdx, charIdx);
+    byteToChar.set(byteIdx, charIdx);
     if (byteIdx === bytes.length) break;
     const b = bytes[byteIdx];
     byteIdx += b < 0x80 ? 1 : b < 0xE0 ? 2 : b < 0xF0 ? 3 : 4;

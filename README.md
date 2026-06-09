@@ -19,7 +19,11 @@ Ladda upp en `.txt`-fil, välj vilka entitetstyper som ska sökas, och låt verk
 |---|---|---|
 | Personnummer | Regex | `850515-1234` |
 | E-postadress | Regex | `namn@example.se` |
-| Telefonnummer | Regex | `+46 8 123 45 67` |
+| Telefonnummer | Regex | `+46 8 123 45 67`, `08-123-45-67` |
+| Organisationsnummer | Regex | `556614-5180` |
+| Konto/Giro | Regex | IBAN `SE9550000000054910000003`, Bankgiro `5402-1234`, Plusgiro `12345-6` |
+| IP-adress | Regex | `8.8.8.8` (publika; privata nät 10.x, 192.168.x m.fl. filtreras bort) |
+| Kortnummer | Regex + Luhn | `4532-1234-5678-9123` (Visa/Mastercard/Amex, valideras med Luhn-algoritmen) |
 | Person | AI (BERT) | `Anders Andersson` |
 | Organisation | AI (BERT) | `Försäkringskassan` |
 | Plats | AI (BERT) | `Stockholm` |
@@ -27,7 +31,7 @@ Ladda upp en `.txt`-fil, välj vilka entitetstyper som ska sökas, och låt verk
 | Tid | AI (BERT) | `idag`, `fem år` *(av som standard)* |
 | Händelse | AI (BERT) | `coronapandemin` *(av som standard)* |
 
-Regex-kategorier körs alltid. AI-kategorier kan slås av/på individuellt.
+Alla kategorier kan slås av/på individuellt i vänsterpanelen.
 
 ---
 
