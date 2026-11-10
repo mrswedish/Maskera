@@ -13,6 +13,7 @@ const REGEX_LABELS = [
   "Org.nummer", "Konto/Giro", "IP-adress", "Kortnummer",
 ] as const;
 const ENTITY_LABELS = ["Person", "Organisation", "Plats", "Övrigt", "Tid", "Händelse"] as const;
+const ENTITY_SET = new Set<string>(ENTITY_LABELS);
 const DEFAULT_ENTITIES = [
   "Personnummer", "E-post", "Telefonnummer",
   "Org.nummer", "Konto/Giro", "Kortnummer",
@@ -54,31 +55,60 @@ function fixMojibake(text: string): string {
 
 /**
  * Rust returnerar byte-offset i UTF-8. JS string.slice() vill ha
- * teckenindex (UTF-16 code units). Konverterar alla match-positioner.
- *
- * Bygger en komplett byte→char-map för ALLA byte-positioner. Tidigare
- * lagrades bara "needed"-positioner — om Rust returnerade en offset som
- * inte träffade setet exakt föll koden tillbaka på byte-värdet som
- * char-index (fel för text med åäö → felaktiga markeringar).
+ * UTF-16 code unit-index. Gör en enda linjär passering utan TextEncoder-kopia
+ * och lagrar endast efterfrågade offset-gränser (inkl. korrekt hantering av
+ * 4-byte UTF-8 / UTF-16 surrogate pairs som emojis).
  */
 function fixByteOffsets(text: string, rawMatches: Match[]): Match[] {
   if (rawMatches.length === 0) return rawMatches;
-  const bytes = new TextEncoder().encode(text);
-  const byteToChar = new Map<number, number>();
-  let charIdx = 0;
-  let byteIdx = 0;
-  while (byteIdx <= bytes.length) {
-    byteToChar.set(byteIdx, charIdx);
-    if (byteIdx === bytes.length) break;
-    const b = bytes[byteIdx];
-    byteIdx += b < 0x80 ? 1 : b < 0xE0 ? 2 : b < 0xF0 ? 3 : 4;
-    charIdx++;
+
+  const needed = new Set<number>();
+  for (const m of rawMatches) {
+    needed.add(m.start);
+    needed.add(m.end);
   }
-  return rawMatches.map(m => ({
+
+  const byteToChar = new Map<number, number>();
+  let u16 = 0;
+  let byteIdx = 0;
+  const len = text.length;
+
+  while (u16 < len) {
+    if (needed.has(byteIdx)) {
+      byteToChar.set(byteIdx, u16);
+      if (byteToChar.size === needed.size) break;
+    }
+    const code = text.charCodeAt(u16);
+    if (code < 0x80) {
+      byteIdx += 1;
+      u16 += 1;
+    } else if (code < 0x800) {
+      byteIdx += 2;
+      u16 += 1;
+    } else if (code >= 0xD800 && code <= 0xDBFF && u16 + 1 < len) {
+      // Surrogate pair (4 UTF-8 bytes, 2 UTF-16 code units)
+      byteIdx += 4;
+      u16 += 2;
+    } else {
+      byteIdx += 3;
+      u16 += 1;
+    }
+  }
+  if (needed.has(byteIdx)) {
+    byteToChar.set(byteIdx, u16);
+  }
+
+  return rawMatches.map((m) => ({
     ...m,
     start: byteToChar.get(m.start) ?? m.start,
-    end:   byteToChar.get(m.end)   ?? m.end,
+    end: byteToChar.get(m.end) ?? m.end,
   }));
+}
+
+function formatDuration(ms: number | null): string {
+  if (ms === null) return "";
+  if (ms < 1000) return ` på ${Math.max(1, Math.round(ms))} ms`;
+  return ` på ${(ms / 1000).toFixed(2).replace(".", ",")} s`;
 }
 
 /** Kontrollerar om modellen finns, laddar annars ner via Rust async streaming, laddar sedan i Rust */
@@ -90,9 +120,9 @@ async function initModel(
   const exists = await invoke<boolean>("models_exist");
   if (!exists) {
     setStatus("Laddar ner modell från HuggingFace…");
-    await invoke("download_model"); // Rust hanterar streaming + progress-events
+    await invoke("download_model");
   }
-  await invoke("load_model"); // laddar från disk, emitterar model_ready
+  await invoke("load_model");
 }
 
 async function saveTextFile(content: string, defaultName: string): Promise<void> {
@@ -120,22 +150,27 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [threshold, setThreshold] = useState(0.60);
   const [phase, setPhase] = useState<"modell" | "analys" | "klar" | null>("modell");
+  const [lastDurationMs, setLastDurationMs] = useState<number | null>(null);
+  const [dragActive, setDragActive] = useState(false);
+
+  const needsNer = useMemo(
+    () => entities.some((e) => ENTITY_SET.has(e)),
+    [entities]
+  );
 
   // Härled status-bandets fas från app-state
   useEffect(() => {
-    if (!engineReady) { setPhase("modell"); return; }
-    if (analyzing)    { setPhase("analys"); return; }
-    if (matches.length > 0) {
+    if (analyzing) { setPhase("analys"); return; }
+    if (!engineReady && needsNer) { setPhase("modell"); return; }
+    if (lastDurationMs !== null) {
       setPhase("klar");
-      const t = setTimeout(() => setPhase(null), 4000);
+      const t = setTimeout(() => setPhase(null), 4500);
       return () => clearTimeout(t);
     }
     setPhase(null);
-  }, [engineReady, analyzing, matches.length]);
+  }, [engineReady, needsNer, analyzing, lastDurationMs]);
 
   useEffect(() => {
-    // Registrera lyssnare INNAN invoke — annars kan model_ready emitteras
-    // innan lyssnaren är registrerad (race condition).
     const unlisteners: (() => void)[] = [];
 
     Promise.all([
@@ -146,11 +181,11 @@ export default function App() {
     ]).then((fns) => {
       unlisteners.push(...fns);
       initModel(setModelStatus, setDownloadProgress).catch((e) =>
-        alert("Modell-laddning misslyckades: " + String(e))
+        setModelStatus("Kunde inte ladda AI-modell automatiskt (" + String(e) + ")")
       );
     });
 
-    return () => { unlisteners.forEach(f => f()); };
+    return () => { unlisteners.forEach((f) => f()); };
   }, []);
 
   // Manuell tillägg
@@ -162,45 +197,54 @@ export default function App() {
     [matches, ignoredKeys]
   );
 
-  // Bygg bara om översättningstabellen från aktiva matches
   const activeTranslationTable = useMemo(
     () => buildTranslationTable(activeMatches),
     [activeMatches]
   );
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const loadFile = useCallback((file: File) => {
     setFileName(file.name);
     const reader = new FileReader();
     reader.onload = (ev) => {
       const raw = ev.target?.result as string;
-      // Normalisera radbrytningar och problematiska whitespace-tecken
-      // så att regex-positioner och NER-positioner alltid stämmer.
       const normalized = fixMojibake(raw)
-        .replace(/\r\n/g, "\n")   // Windows → Unix
-        .replace(/\r/g, "\n")     // gamla Mac
-        .replace(/\u00a0/g, " ")  // non-breaking space
-        .replace(/\u2028/g, "\n") // line separator
-        .replace(/\u2029/g, "\n") // paragraph separator
-        .replace(/\ufffd/g, " "); // replacement char (trasig encoding)
+        .replace(/\r\n/g, "\n")
+        .replace(/\r/g, "\n")
+        .replace(/\u00a0/g, " ")
+        .replace(/\u2028/g, "\n")
+        .replace(/\u2029/g, "\n")
+        .replace(/\ufffd/g, " ");
       setFileContent(normalized);
       setMatches([]);
       setIgnoredKeys(new Set());
       setShowTranslationTable(false);
+      setLastDurationMs(null);
     };
     reader.readAsText(file);
+  }, []);
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) loadFile(file);
+  };
+
+  const handleDrop = (e: React.DragEvent<HTMLLabelElement>) => {
+    e.preventDefault();
+    setDragActive(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) loadFile(file);
   };
 
   const handleAnalyze = async () => {
-    if (!fileContent || analyzing || !engineReady) return;
+    if (!fileContent || analyzing || (needsNer && !engineReady)) return;
     setAnalyzing(true);
+    const t0 = performance.now();
     try {
       const raw = await invoke<Match[]>("analyze_text", { text: fileContent, entities, threshold });
-      // Konvertera UTF-8 byte-offset → JS char-index (åäö = 2 bytes, 1 char)
       const result = fixByteOffsets(fileContent, raw);
       setMatches(result.sort((a, b) => a.start - b.start));
       setIgnoredKeys(new Set());
+      setLastDurationMs(performance.now() - t0);
     } catch (err) {
       alert("Fel vid analys: " + String(err));
     } finally {
@@ -236,7 +280,6 @@ export default function App() {
     }
 
     setMatches((prev) => {
-      // Slå ihop, sortera och deduplicera mot befintliga matches
       const combined = [...prev, ...newMatches].sort((a, b) => a.start - b.start);
       const deduped: Match[] = [];
       let lastEnd = -1;
@@ -305,13 +348,13 @@ export default function App() {
       cursor = m.start;
     }
     segments.push(fileContent.slice(0, cursor));
-    await saveTextFile(segments.reverse().join(""), fileName.replace(".txt", "_maskerad.txt"));
+    await saveTextFile(segments.reverse().join(""), fileName.replace(/\.txt$/i, "") + "_maskerad.txt");
   };
 
   const handleExportJSON = async () => {
     await saveJsonFile(
       JSON.stringify([...activeTranslationTable.values()], null, 2),
-      fileName.replace(".txt", "_oversattning.json")
+      fileName.replace(/\.txt$/i, "") + "_oversattning.json"
     );
   };
 
@@ -321,7 +364,7 @@ export default function App() {
       .join("\n");
     await saveTextFile(
       "Maskerat label\tOriginalvärde\tFörekomster\n" + rows,
-      fileName.replace(".txt", "_oversattning.txt")
+      fileName.replace(/\.txt$/i, "") + "_oversattning.txt"
     );
   };
 
@@ -341,6 +384,7 @@ export default function App() {
 
   const ignoredCount = ignoredKeys.size;
   const activeCount = activeMatches.length;
+  const canAnalyze = Boolean(fileContent) && !analyzing && (engineReady || !needsNer);
 
   return (
     <div className="app-container">
@@ -348,7 +392,7 @@ export default function App() {
         <Shield size={30} color="#818cf8" />
         <h1>Maskera</h1>
         <button
-          onClick={() => setShowSettings(v => !v)}
+          onClick={() => setShowSettings((v) => !v)}
           title="Inställningar"
           style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer", padding: "0.25rem", color: showSettings ? "#818cf8" : "#64748b" }}
         >
@@ -369,7 +413,7 @@ export default function App() {
             <input
               type="range" min={0.30} max={0.95} step={0.05}
               value={threshold}
-              onChange={e => setThreshold(parseFloat(e.target.value))}
+              onChange={(e) => setThreshold(parseFloat(e.target.value))}
               style={{ width: "120px", accentColor: "#818cf8" }}
             />
             <span style={{
@@ -385,7 +429,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Statusband — visas vid aktivitet (modellnedladdning, analys, eller kort efter klar) */}
+      {/* Statusband */}
       {phase && (() => {
         const phaseColor = phase === "modell" ? "#06b6d4" : phase === "analys" ? "#818cf8" : "#10b981";
         let progressPct = 0;
@@ -399,21 +443,21 @@ export default function App() {
             label = modelStatus;
           }
         } else if (phase === "analys") {
-          if (nerProgress) {
+          if (nerProgress && nerProgress.total > 0) {
             progressPct = (nerProgress.chunk / nerProgress.total) * 100;
             label = `Analyserar — Block ${nerProgress.chunk} / ${nerProgress.total} (${Math.round(progressPct)}%)`;
           } else {
-            progressPct = 5;
-            label = "Förbereder analys…";
+            progressPct = 10;
+            label = "Analyserar…";
           }
         } else {
           progressPct = 100;
-          label = `Klar — ${activeMatches.length} träffar hittade`;
+          label = `Klar${formatDuration(lastDurationMs)} — ${activeMatches.length} träffar hittade`;
         }
         const stepState = (target: "modell" | "analys" | "klar") => {
           if (phase === target) return "active";
           if (target === "modell" && phase !== "modell") return "done";
-          if (target === "analys" && phase === "klar")   return "done";
+          if (target === "analys" && phase === "klar") return "done";
           return "idle";
         };
         return (
@@ -470,7 +514,17 @@ export default function App() {
             <h2 className="panel-title">
               <FileText size={20} color="#94a3b8" /> Ladda upp text
             </h2>
-            <label className="upload-area" style={{ marginTop: "1rem" }}>
+            <label
+              className="upload-area"
+              style={{
+                marginTop: "1rem",
+                borderColor: dragActive ? "#818cf8" : undefined,
+                backgroundColor: dragActive ? "rgba(99, 102, 241, 0.1)" : undefined,
+              }}
+              onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
+              onDragLeave={() => setDragActive(false)}
+              onDrop={handleDrop}
+            >
               <Upload size={32} color="#94a3b8" />
               <span className="upload-text">Dra och släpp eller klicka för .txt</span>
               <input type="file" accept=".txt" onChange={handleFileUpload} />
@@ -484,7 +538,7 @@ export default function App() {
 
           <div>
             <h2 className="panel-title" style={{ marginBottom: "0.75rem" }}>Vad ska maskeras?</h2>
-            <p style={{ fontSize: "0.72rem", color: "#64748b", marginBottom: "0.5rem", marginTop: 0 }}>Regex</p>
+            <p style={{ fontSize: "0.72rem", color: "#64748b", marginBottom: "0.5rem", marginTop: 0 }}>Regex (omedelbar)</p>
             <div className="checkbox-group" style={{ marginBottom: "0.75rem" }}>
               {REGEX_LABELS.map((ent) => (
                 <label key={ent} className="checkbox-label">
@@ -498,7 +552,7 @@ export default function App() {
                 </label>
               ))}
             </div>
-            <p style={{ fontSize: "0.72rem", color: "#64748b", marginBottom: "0.5rem", marginTop: 0 }}>AI (BERT)</p>
+            <p style={{ fontSize: "0.72rem", color: "#64748b", marginBottom: "0.5rem", marginTop: 0 }}>AI (BERT — ONNX Runtime)</p>
             <div className="checkbox-group">
               {ENTITY_LABELS.map((ent) => (
                 <label key={ent} className="checkbox-label">
@@ -551,7 +605,7 @@ export default function App() {
 
           <button
             onClick={handleAnalyze}
-            disabled={!fileContent || analyzing || !engineReady}
+            disabled={!canAnalyze}
             className="btn-primary"
           >
             {analyzing ? "Skannar text..." : "Granska Text"}

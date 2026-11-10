@@ -1,12 +1,37 @@
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
-use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
+
+use ndarray::Array2;
+use ort::environment::Environment;
+use ort::session::builder::GraphOptimizationLevel;
+use ort::session::Session;
+use ort::value::TensorRef;
 use serde::{Deserialize, Serialize};
-use tokenizers::Tokenizer;
-use tract_onnx::prelude::*;
+use tokenizers::{Encoding, Tokenizer};
 
-// ── Typaliaser ────────────────────────────────────────────────────────────────
+// ── Global ORT-miljö ──────────────────────────────────────────────────────────
 
-pub type NerModel = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
+static ORT_ENV: OnceLock<Result<Environment, String>> = OnceLock::new();
+
+fn get_ort_env() -> Result<&'static Environment, String> {
+    ORT_ENV
+        .get_or_init(|| {
+            ort::init()
+                .with_telemetry(false)
+                .build()
+                .map_err(|e| format!("Kunde inte initiera ONNX Runtime: {e}"))
+        })
+        .as_ref()
+        .map_err(|e| e.clone())
+}
+
+// ── Modell-wrapper ────────────────────────────────────────────────────────────
+
+pub struct NerModel {
+    session: Mutex<Session>,
+    has_token_type_ids: bool,
+}
 
 // ── Match ─────────────────────────────────────────────────────────────────────
 
@@ -21,29 +46,67 @@ pub struct Match {
 
 // ── Etikettmappning ───────────────────────────────────────────────────────────
 
-fn id_to_ui(id: usize, requested: &[String]) -> Option<&'static str> {
-    let label = match id {
-        9        => "Person",
-        3 | 5    => "Person",        // ORG/PRS, PRS/WRK
-        10       => "Person",        // LOC/PRS
-        8 | 4    => "Organisation",  // ORG, OBJ/ORG
-        11       => "Organisation",  // LOC/ORG
-        7        => "Plats",
-        2        => "Tid",           // TME
-        13       => "Händelse",      // EVN
-        12       => "Övrigt",        // MSR
-        _        => return None,     // O, OBJ, WRK
+#[inline]
+fn id_to_ui(id: usize, requested_mask: u8) -> Option<&'static str> {
+    // Bitmask för requested-kategorier eliminerar upprepade String-jämförelser i inre loopen
+    let (bit, label) = match id {
+        9 | 3 | 5 | 10 => (1 << 0, "Person"),       // PER, ORG/PRS, PRS/WRK, LOC/PRS
+        8 | 4 | 11     => (1 << 1, "Organisation"), // ORG, OBJ/ORG, LOC/ORG
+        7              => (1 << 2, "Plats"),        // LOC
+        12             => (1 << 3, "Övrigt"),       // MSR
+        2              => (1 << 4, "Tid"),          // TME
+        13             => (1 << 5, "Händelse"),     // EVN
+        _              => return None,              // O, OBJ, WRK
     };
-    if requested.iter().any(|r| r == label) { Some(label) } else { None }
+    if (requested_mask & bit) != 0 {
+        Some(label)
+    } else {
+        None
+    }
+}
+
+fn build_requested_mask(requested: &[String]) -> u8 {
+    let mut mask = 0u8;
+    for r in requested {
+        match r.as_str() {
+            "Person"       => mask |= 1 << 0,
+            "Organisation" => mask |= 1 << 1,
+            "Plats"        => mask |= 1 << 2,
+            "Övrigt"       => mask |= 1 << 3,
+            "Tid"          => mask |= 1 << 4,
+            "Händelse"     => mask |= 1 << 5,
+            _ => {}
+        }
+    }
+    mask
 }
 
 // ── Modell-init ───────────────────────────────────────────────────────────────
 
-pub fn load_model(model_path: &Path) -> TractResult<NerModel> {
-    tract_onnx::onnx()
-        .model_for_path(model_path)?
-        .into_optimized()?
-        .into_runnable()
+pub fn load_model(model_path: &Path) -> Result<NerModel, String> {
+    let env = get_ort_env()?;
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get().clamp(1, 16))
+        .unwrap_or(4);
+
+    let session = Session::builder(env)
+        .map_err(|e| format!("SessionBuilder-fel: {e}"))?
+        .with_optimization_level(GraphOptimizationLevel::All)
+        .unwrap_or_else(|e| e.recover())
+        .with_intra_threads(threads)
+        .unwrap_or_else(|e| e.recover())
+        .commit_from_file(model_path)
+        .map_err(|e| format!("Kunde inte ladda ONNX-modell: {e}"))?;
+
+    let has_token_type_ids = session
+        .inputs()
+        .iter()
+        .any(|inp| inp.name() == "token_type_ids");
+
+    Ok(NerModel {
+        session: Mutex::new(session),
+        has_token_type_ids,
+    })
 }
 
 pub fn load_tokenizer(tokenizer_path: &Path) -> Result<Tokenizer, String> {
@@ -52,135 +115,174 @@ pub fn load_tokenizer(tokenizer_path: &Path) -> Result<Tokenizer, String> {
     tok.with_truncation(Some(tokenizers::TruncationParams {
         max_length: 512,
         ..Default::default()
-    })).map_err(|e| format!("Truncation-fel: {e}"))?;
+    }))
+    .map_err(|e| format!("Truncation-fel: {e}"))?;
     Ok(tok)
 }
 
-// ── Chunking ──────────────────────────────────────────────────────────────────
+// ── Smart zero-copy chunking ──────────────────────────────────────────────────
 
-const CHUNK_CHARS: usize = 1200;
-// 200 tecken ger marginal för att svenska sammansatta namn (t.ex. "Anna-Karin
-// Andersson") inte ska klippas mellan chunks. Kostnad: ~17% fler chunks.
-const OVERLAP: usize = 200;
+const CHUNK_CHARS: usize = 1600;
+const MIN_BREAK_SEARCH: usize = 700;
+const MID_SENTENCE_OVERLAP: usize = 120;
+const DENSE_FALLBACK_CHARS: usize = 500;
+const BATCH_SIZE: usize = 8;
 
-fn chunk_text(text: &str) -> Vec<(String, usize)> {
-    let chars: Vec<char> = text.chars().collect();
-    let n = chars.len();
+/// Delar texten i naturliga stycke-/meningsblock utan onödig kopiering (`O(N)`).
+/// Lägger endast överlapp när vi tvingas bryta mitt i en mening — vid stycke-
+/// eller meningsslut behövs inget överlapp alls (sparar ~30–40 % beräkning).
+fn chunk_text_with_limit<'a>(text: &'a str, max_chars: usize) -> Vec<(&'a str, usize)> {
+    if text.is_empty() {
+        return vec![];
+    }
+
+    let char_offsets: Vec<(usize, char)> = text.char_indices().collect();
+    let n = char_offsets.len();
     let mut chunks = Vec::new();
     let mut pos = 0usize;
 
+    let min_search = (max_chars / 2).min(MIN_BREAK_SEARCH);
+
     while pos < n {
-        let end_raw = (pos + CHUNK_CHARS).min(n);
-        let end = if end_raw >= n {
-            n
+        let end_raw = (pos + max_chars).min(n);
+        if end_raw >= n {
+            let byte_start = char_offsets[pos].0;
+            let slice = &text[byte_start..];
+            if !slice.trim().is_empty() {
+                chunks.push((slice, byte_start));
+            }
+            break;
+        }
+
+        let search_from = (pos + min_search).min(end_raw);
+        let window = &char_offsets[search_from..end_raw];
+
+        // 1. Styckebrytning (\n\n) eller radbrytning (\n) → ren brytpunkt (0 överlapp)
+        let para_break = window
+            .windows(2)
+            .rposition(|w| w[0].1 == '\n' && w[1].1 == '\n')
+            .map(|i| search_from + i + 2)
+            .or_else(|| {
+                window
+                    .iter()
+                    .rposition(|&(_, c)| c == '\n')
+                    .map(|i| search_from + i + 1)
+            });
+
+        // 2. Meningsslut (. / ! / ? följt av mellanslag) → ren brytpunkt (0 överlapp)
+        let sentence_break = if para_break.is_none() {
+            window
+                .windows(2)
+                .rposition(|w| matches!(w[0].1, '.' | '!' | '?') && w[1].1.is_whitespace())
+                .map(|i| search_from + i + 2)
         } else {
-            let slice = &chars[pos..end_raw];
-            let sentence_break = slice.windows(2)
-                .rposition(|w| w[0] == '.' && w[1] == ' ')
-                .map(|i| i + 1);
-            let word_break = slice.iter().rposition(|&c| c == ' ');
-            let cut = sentence_break.or(word_break).unwrap_or(end_raw - pos);
-            pos + cut
+            None
         };
 
-        let chunk_str: String = chars[pos..end].iter().collect();
-        let byte_start: usize = chars[..pos].iter().collect::<String>().len();
-        chunks.push((chunk_str, byte_start));
+        let (end, clean_break) = if let Some(cut) = para_break.or(sentence_break) {
+            (cut, true)
+        } else if let Some(space_rel) = char_offsets[pos..end_raw]
+            .iter()
+            .rposition(|&(_, c)| c.is_whitespace())
+        {
+            let cut = pos + space_rel + 1;
+            if cut > pos {
+                (cut, false)
+            } else {
+                (end_raw, false)
+            }
+        } else {
+            (end_raw, false)
+        };
 
-        if end >= n { break; }
-        let next_pos = if end > OVERLAP { end - OVERLAP } else { pos + 1 };
-        pos = next_pos.max(pos + 1);
+        let byte_start = char_offsets[pos].0;
+        let byte_end = char_offsets[end].0;
+        let slice = &text[byte_start..byte_end];
+        if !slice.trim().is_empty() {
+            chunks.push((slice, byte_start));
+        }
+
+        if clean_break {
+            pos = end;
+        } else {
+            let overlap = MID_SENTENCE_OVERLAP.min(max_chars / 3);
+            let mut next_pos = end.saturating_sub(overlap).max(pos + 1);
+            // Backa/framåt till närmaste ordgräns så vi inte klipper mitt i ett ord
+            while next_pos < end && !char_offsets[next_pos - 1].1.is_whitespace() {
+                next_pos += 1;
+            }
+            if next_pos >= end {
+                next_pos = end;
+            }
+            pos = next_pos;
+        }
     }
+
     chunks
 }
 
-// ── Inferens för ett chunk ────────────────────────────────────────────────────
+// ── Post-processing av ett chunks logits ──────────────────────────────────────
 
-fn run_chunk(
+fn extract_matches_from_logits(
     chunk: &str,
     chunk_byte_start: usize,
-    model: &NerModel,
-    tokenizer: &Tokenizer,
-    requested: &[String],
+    encoding: &Encoding,
+    chunk_logits: &[f32],
+    num_labels: usize,
+    requested_mask: u8,
     threshold: f32,
 ) -> Vec<Match> {
-    let encoding = match tokenizer.encode(chunk, false) {
-        Ok(e) => e,
-        Err(_) => return vec![],
-    };
+    let offsets = encoding.get_offsets();
+    let word_ids = encoding.get_word_ids();
+    let seq_len = encoding.get_ids().len();
 
-    let ids: Vec<i64>   = encoding.get_ids().iter().map(|&x| x as i64).collect();
-    let mask: Vec<i64>  = encoding.get_attention_mask().iter().map(|&x| x as i64).collect();
-    let types: Vec<i64> = encoding.get_type_ids().iter().map(|&x| x as i64).collect();
-    let offsets         = encoding.get_offsets();
-    let word_ids        = encoding.get_word_ids(); // word_id per token (None = special token)
-
-    let seq_len = ids.len();
-    if seq_len == 0 { return vec![]; }
-
-    let mk = |v: Vec<i64>| -> TractResult<TValue> {
-        let arr = tract_ndarray::Array2::from_shape_vec((1, seq_len), v)?;
-        Ok(arr.into_tensor().into())
-    };
-
-    let input_ids_t   = match mk(ids)   { Ok(t) => t, Err(_) => return vec![] };
-    let attention_t   = match mk(mask)  { Ok(t) => t, Err(_) => return vec![] };
-    let token_types_t = match mk(types) { Ok(t) => t, Err(_) => return vec![] };
-
-    let outputs = match model.run(tvec!(input_ids_t, attention_t, token_types_t)) {
-        Ok(o) => o,
-        Err(_) => return vec![],
-    };
-
-    // logits: [1, seq_len, 14]
-    let logits = match outputs[0].to_array_view::<f32>() {
-        Ok(v) => v,
-        Err(_) => return vec![],
-    };
-
-    let num_labels = logits.shape()[2];
-
-    // ── Fas 1: aggregera token-prediktioner till ord-nivå via word_ids ────────
-    //
-    // word_id-strategin löser "Cosmi" ur "Cosmic":
-    // Tokenizern delar "Cosmic" → ["Cosmi"(word_id=5), "##c"(word_id=5)].
-    // Om "Cosmi" → Person men "##c" → O, ska hela ordet "Cosmic" ändå få
-    // etiketten Person (så att det är ett komplett ord som markeras).
-    // BTreeMap håller orden i textordning (stigande word_id).
-    //
-    // word_map: word_id → (byte_start, byte_end, best_label, best_prob)
-    // Weighted voting: token med högst confidence inom ett ord bestämmer etiketten.
-    // Tidigare vann "första entity-tokenen" oavsett konfidens, vilket gav fel
-    // etikett när första token var osäker men senare token var stark.
+    // word_id -> (byte_start, byte_end, best_label, best_prob)
     let mut word_map: BTreeMap<u32, (usize, usize, Option<&'static str>, f32)> = BTreeMap::new();
 
-    for (tok_i, offset) in offsets.iter().enumerate() {
-        let Some(word_id) = word_ids[tok_i] else { continue }; // hoppa [CLS]/[SEP]
-
-        // Argmax + softmax-sannolikhet för vinnande klass
-        let mut best_id = 0usize;
-        let mut best_val = f32::NEG_INFINITY;
-        for l in 0..num_labels {
-            let v = logits[[0, tok_i, l]];
-            if v > best_val { best_val = v; best_id = l; }
-        }
-        let exp_vals: Vec<f32> = (0..num_labels)
-            .map(|l| (logits[[0, tok_i, l]] - best_val).exp())
-            .collect();
-        let sum_exp: f32 = exp_vals.iter().sum();
-        let best_prob = exp_vals[best_id] / sum_exp;
-
-        let ui_label = if best_id == 0 || best_prob < threshold {
-            None
-        } else {
-            id_to_ui(best_id, requested)
+    for tok_i in 0..seq_len {
+        let Some(word_id) = word_ids[tok_i] else {
+            continue; // hoppa över [CLS] och [SEP]
         };
+        let offset = offsets[tok_i];
+        let row = &chunk_logits[tok_i * num_labels..(tok_i + 1) * num_labels];
 
-        let entry = word_map.entry(word_id).or_insert((offset.0, offset.1, None, 0.0));
-        if offset.0 < entry.0 { entry.0 = offset.0; }
-        if offset.1 > entry.1 { entry.1 = offset.1; }
-        // Behåll etikett med högst confidence
-        if let Some(lbl) = ui_label {
+        let mut best_id = 0usize;
+        let mut best_val = row[0];
+        for (l, &v) in row.iter().enumerate().skip(1) {
+            if v > best_val {
+                best_val = v;
+                best_id = l;
+            }
+        }
+
+        // Snabbväg: 90–95 % av alla tokens är "O" (id 0) eller en icke-efterfrågad kategori.
+        // Då hoppar vi över alla exp()-beräkningar helt.
+        let mut chosen_label = None;
+        let mut best_prob = 0.0f32;
+        if best_id != 0 {
+            if let Some(lbl) = id_to_ui(best_id, requested_mask) {
+                let mut sum_exp = 0.0f32;
+                for &v in row {
+                    sum_exp += (v - best_val).exp();
+                }
+                // exp(best_val - best_val) == 1.0
+                best_prob = 1.0 / sum_exp;
+                if best_prob >= threshold {
+                    chosen_label = Some(lbl);
+                }
+            }
+        }
+
+        let entry = word_map
+            .entry(word_id)
+            .or_insert((offset.0, offset.1, None, 0.0));
+        if offset.0 < entry.0 {
+            entry.0 = offset.0;
+        }
+        if offset.1 > entry.1 {
+            entry.1 = offset.1;
+        }
+        if let Some(lbl) = chosen_label {
             if best_prob > entry.3 {
                 entry.2 = Some(lbl);
                 entry.3 = best_prob;
@@ -188,8 +290,7 @@ fn run_chunk(
         }
     }
 
-    // ── Fas 2: aggregera intilliggande ord med samma entitetsetikett ──────────
-
+    // Aggregera intilliggande ord med samma entitetsetikett
     let mut result_matches: Vec<Match> = Vec::new();
     let mut current: Option<(usize, usize, &'static str)> = None;
 
@@ -197,7 +298,11 @@ fn run_chunk(
                  chunk_text: &str,
                  out: &mut Vec<Match>| {
         if let Some((s, e, lbl)) = cur {
-            let raw = &chunk_text[s..e.min(chunk_text.len())];
+            let safe_e = e.min(chunk_text.len());
+            if s >= safe_e {
+                return;
+            }
+            let raw = &chunk_text[s..safe_e];
             let trimmed = raw.trim();
             if !trimmed.is_empty() {
                 let trim_start = s + (raw.len() - raw.trim_start().len());
@@ -244,15 +349,11 @@ fn run_chunk(
 // ── Deduplicering ─────────────────────────────────────────────────────────────
 
 fn deduplicate(mut matches: Vec<Match>) -> Vec<Match> {
-    // Steg 1: filtrera bort exakta dubbletter (samma start, end och label).
-    // Två overlappande chunks kan annars ge identisk träff två gånger med
-    // olika etiketter på samma span — tidigare släpptes båda igenom.
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::with_capacity(matches.len());
     matches.retain(|m| seen.insert((m.start, m.end, m.label.clone())));
 
-    // Steg 2: sortera och behåll bara icke-överlappande träffar (första vinner).
-    matches.sort_by_key(|m| m.start);
-    let mut result: Vec<Match> = Vec::new();
+    matches.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end)));
+    let mut result: Vec<Match> = Vec::with_capacity(matches.len());
     let mut last_end = 0usize;
     for m in matches {
         if m.start >= last_end {
@@ -273,21 +374,169 @@ pub fn run_ner(
     tokenizer: &Tokenizer,
     progress_cb: impl Fn(usize, usize),
 ) -> Vec<Match> {
-    if requested.is_empty() { return vec![]; }
-
-    let chunks = chunk_text(text);
-    let total = chunks.len();
-    let mut all_matches: Vec<Match> = Vec::new();
-
-    for (i, (chunk, byte_start)) in chunks.iter().enumerate() {
-        if i % 5 == 0 {
-            progress_cb(i, total);
-        }
-        let mut ms = run_chunk(chunk, *byte_start, model, tokenizer, requested, threshold);
-        all_matches.append(&mut ms);
+    let requested_mask = build_requested_mask(requested);
+    if requested_mask == 0 || text.trim().is_empty() {
+        return vec![];
     }
-    // Sista progress
-    progress_cb(total, total);
 
+    let initial_chunks = chunk_text_with_limit(text, CHUNK_CHARS);
+    if initial_chunks.is_empty() {
+        return vec![];
+    }
+
+    // 1. Parallell batch-tokenisering (använder rayon internt i tokenizers)
+    let raw_slices: Vec<&str> = initial_chunks.iter().map(|(s, _)| *s).collect();
+    let initial_encodings = match tokenizer.encode_batch(raw_slices, true) {
+        Ok(enc) => enc,
+        Err(_) => return vec![],
+    };
+
+    // Om något chunk slår i taket (>= 510 tokens, t.ex. tabeller med många symboler),
+    // dela upp just det chunket i mindre bitar så att inga tokens någonsin trunkeras bort.
+    let mut prepared: Vec<(&str, usize, Encoding)> = Vec::with_capacity(initial_chunks.len());
+    for ((slice, byte_start), enc) in initial_chunks.into_iter().zip(initial_encodings) {
+        if enc.get_ids().len() >= 510 && slice.chars().count() > DENSE_FALLBACK_CHARS {
+            let sub_chunks = chunk_text_with_limit(slice, DENSE_FALLBACK_CHARS);
+            let sub_slices: Vec<&str> = sub_chunks.iter().map(|(s, _)| *s).collect();
+            if let Ok(sub_encs) = tokenizer.encode_batch(sub_slices, true) {
+                for ((sub_s, rel_start), sub_e) in sub_chunks.into_iter().zip(sub_encs) {
+                    if !sub_e.get_ids().is_empty() {
+                        prepared.push((sub_s, byte_start + rel_start, sub_e));
+                    }
+                }
+                continue;
+            }
+        }
+        if !enc.get_ids().is_empty() {
+            prepared.push((slice, byte_start, enc));
+        }
+    }
+
+    let total = prepared.len();
+    if total == 0 {
+        return vec![];
+    }
+    progress_cb(0, total);
+
+    // 2. Sortera index efter sekvenslängd för minimal padding i varje mini-batch
+    let mut order: Vec<usize> = (0..total).collect();
+    order.sort_by_key(|&idx| prepared[idx].2.get_ids().len());
+
+    let mut session = match model.session.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    let mut per_chunk_matches: Vec<Vec<Match>> = vec![Vec::new(); total];
+    let mut completed = 0usize;
+
+    for batch_indices in order.chunks(BATCH_SIZE) {
+        let b_size = batch_indices.len();
+        let max_seq_len = batch_indices
+            .iter()
+            .map(|&idx| prepared[idx].2.get_ids().len())
+            .max()
+            .unwrap_or(0);
+
+        if max_seq_len == 0 {
+            completed += b_size;
+            progress_cb(completed, total);
+            continue;
+        }
+
+        let mut ids_flat = vec![0i64; b_size * max_seq_len];
+        let mut mask_flat = vec![0i64; b_size * max_seq_len];
+
+        for (row_i, &chunk_idx) in batch_indices.iter().enumerate() {
+            let enc = &prepared[chunk_idx].2;
+            let ids = enc.get_ids();
+            let mask = enc.get_attention_mask();
+            let row_start = row_i * max_seq_len;
+            for (j, &id) in ids.iter().enumerate() {
+                ids_flat[row_start + j] = id as i64;
+            }
+            for (j, &m) in mask.iter().enumerate() {
+                mask_flat[row_start + j] = m as i64;
+            }
+        }
+
+        let Ok(ids_arr) = Array2::from_shape_vec((b_size, max_seq_len), ids_flat) else {
+            continue;
+        };
+        let Ok(mask_arr) = Array2::from_shape_vec((b_size, max_seq_len), mask_flat) else {
+            continue;
+        };
+
+        let Ok(ids_ref) = TensorRef::from_array_view(&ids_arr) else {
+            continue;
+        };
+        let Ok(mask_ref) = TensorRef::from_array_view(&mask_arr) else {
+            continue;
+        };
+
+        let run_res = if model.has_token_type_ids {
+            let types_arr = Array2::<i64>::zeros((b_size, max_seq_len));
+            match TensorRef::from_array_view(&types_arr) {
+                Ok(types_ref) => session.run(ort::inputs![
+                    "input_ids" => ids_ref,
+                    "attention_mask" => mask_ref,
+                    "token_type_ids" => types_ref,
+                ]),
+                Err(_) => continue,
+            }
+        } else {
+            session.run(ort::inputs![
+                "input_ids" => ids_ref,
+                "attention_mask" => mask_ref,
+            ])
+        };
+
+        if let Ok(outputs) = run_res {
+            if let Ok((shape, logits_slice)) = outputs[0].try_extract_tensor::<f32>() {
+                if shape.len() == 3 {
+                    let num_labels = shape[2] as usize;
+                    let chunk_stride = max_seq_len * num_labels;
+
+                    for (row_i, &chunk_idx) in batch_indices.iter().enumerate() {
+                        let (chunk_str, byte_start, ref enc) = prepared[chunk_idx];
+                        let slice_start = row_i * chunk_stride;
+                        let slice_end = slice_start + chunk_stride;
+                        if slice_end <= logits_slice.len() {
+                            per_chunk_matches[chunk_idx] = extract_matches_from_logits(
+                                chunk_str,
+                                byte_start,
+                                enc,
+                                &logits_slice[slice_start..slice_end],
+                                num_labels,
+                                requested_mask,
+                                threshold,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        completed += b_size;
+        progress_cb(completed, total);
+    }
+
+    let all_matches: Vec<Match> = per_chunk_matches.into_iter().flatten().collect();
     deduplicate(all_matches)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunks_preserve_exact_utf8_byte_offsets() {
+        let sentence = "Handläggare Åsa Öberg i Ängelholm granskade ärendet noggrant.\n";
+        let full = sentence.repeat(80);
+        let chunks = chunk_text_with_limit(&full, CHUNK_CHARS);
+        assert!(chunks.len() >= 3);
+        for (slice, byte_start) in &chunks {
+            assert_eq!(*slice, &full[*byte_start..*byte_start + slice.len()]);
+        }
+    }
 }

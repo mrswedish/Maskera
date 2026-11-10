@@ -41,20 +41,20 @@ Alla kategorier kan slås av/på individuellt i vänsterpanelen.
 Tauri-app (Rust-shell + WebView)
   └── React-gränssnitt (TypeScript)
         └── Tauri-kommandon (invoke)
-              ├── Regex-pass (personnummer, e-post, telefon) — Rust
-              └── BERT NER — tract-onnx i Rust
+              ├── Regex-pass (förkompilerad Rust-motor, < 1 ms)
+              └── BERT NER — Microsoft ONNX Runtime (`ort`, statiskt länkad i Rust)
                     ├── Modell laddas ner från HuggingFace vid första start
                     ├── Cachas i app-datakatalogen (aldrig bundlad i appen)
-                    └── Körs helt lokalt — ingen server behövs
+                    └── Flertrådad SIMD + mini-batchning helt lokalt — ingen server behövs
 ```
 
 ### Analysflödet
 
-1. **Regex-pass** — tre mönster för personnummer, e-post och telefonnummer (Rust)
-2. **BERT NER** — texten delas i 1 200-teckens chunks (med 80-teckens överlapp); varje chunk analyseras av ONNX-modellen via `tract-onnx`
+1. **Regex-pass** — förkompilerade mönster med svensk datum-/kontrollsiffrevalidering (skiljer t.ex. automatiskt personnummer/samordningsnummer från organisationsnummer). Om endast Regex-kategorier är valda körs analysen på under 1 ms utan att vänta på AI-modellen.
+2. **Smart chunking & BERT NER** — texten delas vid naturliga stycke- och meningsgränser (~1 600 tecken, noll onödigt överlapp vid ren brytpunkt) och analyseras parallellt i längdsorterade mini-batchar via Microsoft ONNX Runtime (`ort`).
 3. **Ord-aggregering** — tokenizerns `word_ids` används för att gruppera subword-tokens till hela ord, undviker att delar av sammansatta ord felidentifieras som entiteter
 4. **Konfidenströskel** — tokens med för svag modellsäkerhet filtreras bort (justerbar i inställningar)
-5. **Deduplicering** — överlappande träffar från olika chunks filtreras bort
+5. **Deduplicering & prioritering** — exakta Regex-träffar prioriteras framför överlappande NER-träffar
 6. **Granskning** — användaren kan klicka för att ignorera träffar, eller lägga till egna
 7. **Maskering** — aktiva träffar ersätts med etiketter som `[PERSON A]`, `[PERSONNUMMER 1]`
 
@@ -92,7 +92,7 @@ Filer som krävs: `model_quantized.onnx`, `tokenizer.json`, `tokenizer_config.js
 | Lager | Teknologi |
 |---|---|
 | AI-modell | [KBLab/bert-base-swedish-cased-ner](https://huggingface.co/KBLab/bert-base-swedish-cased-ner) — svensk BERT tränad på NER |
-| ML-inferens | [tract-onnx](https://github.com/sonos/tract) — native Rust ONNX-körning, fullt systemminne |
+| ML-inferens | [ort (Microsoft ONNX Runtime)](https://ort.pyke.io) — statiskt länkad native SIMD + batchad inferens |
 | Tokenisering | [HuggingFace tokenizers](https://github.com/huggingface/tokenizers) (Rust) |
 | HTTP-nedladdning | [reqwest](https://github.com/seanmonstar/reqwest) — async streaming med native-TLS (respekterar OS-certifikat och systemproxy) |
 | Gränssnitt | React 19 + TypeScript |

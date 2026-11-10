@@ -1,81 +1,41 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance when working with code in this repository.
 
 ## Project Overview
 
-**Maskera** is a Swedish PII-masking desktop application. Users upload `.txt` files, the app highlights sensitive entities, and exports a redacted version. The app is built with Tauri 2 (Rust shell) + React/TypeScript frontend, with a Python FastAPI backend (`masking_engine.py`) that runs as a Tauri sidecar binary.
+**Maskera** is a local Swedish PII-masking desktop application for Windows and macOS. Users upload `.txt` files, the app detects sensitive entities via deterministic Rust regular expressions and Swedish BERT NER (`KBLab/bert-base-swedish-cased-ner` quantized INT8 ONNX), highlights matches in the UI, and exports a redacted text file plus a translation table (`.json` / `.txt`).
 
 ## Commands
 
-### Frontend / Tauri
-
 ```bash
-npm run dev          # Start Vite dev server only (no Tauri)
-npm run tauri dev    # Start full Tauri app with hot reload (starts both Vite + Tauri)
-npm run tauri build  # Bundle production app (calls tsc && vite build internally)
-npm run build        # TypeScript compile + Vite build (frontend only)
+npm install                                           # Install frontend dependencies
+npm run dev                                           # Start Vite dev server only
+npm run tauri dev                                     # Start full Tauri 2 desktop app with hot reload
+npm run build                                         # TypeScript check + Vite frontend build
+npm run tauri build                                   # Build production installer / portable binary
+cargo test --manifest-path src-tauri/Cargo.toml       # Run Rust unit tests
 ```
-
-### Python Backend (masking_engine)
-
-```bash
-# Activate venv first
-source venv/bin/activate
-
-# Run the engine manually (dev/test)
-python masking_engine.py
-
-# Build into a standalone binary (required for Tauri sidecar)
-pip install pyinstaller
-pyinstaller --onefile masking_engine.py
-# Move the resulting binary to src-tauri/bin/masking_engine-<target-triple>
-```
-
-The engine listens on `http://127.0.0.1:8594`. It prints `"redo"` to stdout when the AI model is loaded — the frontend polls for this string to unlock the "Granska Text" button.
 
 ## Architecture
 
-### Two-process design
-
 ```
-Tauri shell (Rust)
-  └── Spawns sidecar: bin/masking_engine  ←── PyInstaller-bundled FastAPI server
-           │
-           └── POST http://127.0.0.1:8594/analyze
-                    │
-                    ├── Regex pass (personnummer, e-post, telefon) — always runs
-                    └── KBLab BERT NER (PER/ORG/LOC/MISC) — runs if entities selected
+Tauri 2 shell (Rust) + React 19 / TypeScript WebView
+  └── Tauri invoke("analyze_text")
+        ├── Precompiled Rust Regex pass (< 1 ms, runs immediately even without AI model)
+        │     └── Personnummer/Samordningsnummer, Org.nummer, E-post, Telefon, Konto/Giro, IPv4, Kortnummer (Luhn)
+        └── Microsoft ONNX Runtime (`ort`, statically linked)
+              ├── Downloads `onnx/model_quantized.onnx` + tokenizer from HuggingFace on first launch
+              ├── Caches in OS app-data `models/` directory
+              └── Multi-threaded SIMD + length-sorted mini-batching (`BATCH_SIZE = 8`) with smart paragraph/sentence chunking
 ```
-
-The Tauri frontend communicates with the Python engine **entirely over localhost HTTP** — there are no Tauri `invoke` commands used for the core masking logic. The Rust `lib.rs` currently only exposes a stub `greet` command.
 
 ### Key files
 
 | File | Role |
 |---|---|
-| [src/App.tsx](src/App.tsx) | Entire UI — file upload, entity selection, text viewer with highlights, save |
-| [masking_engine.py](masking_engine.py) | FastAPI server: regex + KBLab BERT NER, returns `List[Match]` |
-| [src-tauri/src/lib.rs](src-tauri/src/lib.rs) | Tauri app bootstrap, registers shell plugin |
-| [src-tauri/tauri.conf.json](src-tauri/tauri.conf.json) | App config, registers `bin/masking_engine` as external binary |
-
-### Entity label mapping
-
-The UI uses Swedish labels; the backend maps them to KBLab NER tags:
-
-| UI label | KBLab tag |
-|---|---|
-| Person | PER |
-| Organisation | ORG |
-| Plats | LOC |
-| Övrigt | MISC |
-
-Regex-detected entities (`Personnummer`, `E-post`, `Telefonnummer`) always run regardless of checkbox state.
-
-### BERT token limit handling
-
-The engine chunks input text at ≤1500 characters, breaking at sentence/word boundaries, to stay within BERT's 512-token limit. Chunk-relative character offsets are adjusted to global positions before returning.
-
-### Sidecar binary naming
-
-Tauri requires platform-specific suffixes on sidecar binaries. The binary must be placed at `src-tauri/bin/masking_engine-<target-triple>` (e.g. `masking_engine-aarch64-apple-darwin` on Apple Silicon). The `tauri.conf.json` references it as `bin/masking_engine` without the suffix.
+| `src/App.tsx` | Main UI — file upload / drag-and-drop, entity selection, highlighted viewer, manual additions, export |
+| `src/translationUtils.ts` | Consistent entity-to-placeholder mapping (`Person A`, `Personnummer 1`, etc.) |
+| `src-tauri/src/lib.rs` | Tauri commands, HuggingFace streaming model downloader, precompiled Swedish PII regex engine, overlap resolution |
+| `src-tauri/src/ner.rs` | `ort` ONNX Runtime session, zero-copy paragraph/sentence chunker, parallel batch tokenization, batched inference, word-level aggregation |
+| `.github/workflows/build.yml` | GitHub Actions Windows build producing both NSIS setup installer and single-file `Maskera-portabel.exe` |
