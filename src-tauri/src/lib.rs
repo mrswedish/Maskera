@@ -1,20 +1,23 @@
+mod classifier;
 mod ner;
 
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, OnceLock};
 
+use classifier::{build_report, ClassificationReport, EmbeddingClassifier, ParagraphFinding};
 use ner::{Match, NerModel};
 use regex::Regex;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use tokenizers::Tokenizer;
 
-// ── Global singleton ──────────────────────────────────────────────────────────
+// ── Globala singletons ────────────────────────────────────────────────────────
 
 static SESSION: OnceLock<NerModel> = OnceLock::new();
 static TOKENIZER: OnceLock<Tokenizer> = OnceLock::new();
+static CLASSIFIER: OnceLock<EmbeddingClassifier> = OnceLock::new();
 
-/// (fjärrsökväg på HuggingFace, lokalt filnamn i models-mappen)
+/// Filer för KBLab BERT NER
 const MODEL_FILES: &[(&str, &str)] = &[
     ("onnx/model_quantized.onnx", "model_quantized.onnx"),
     ("tokenizer.json", "tokenizer.json"),
@@ -23,8 +26,17 @@ const MODEL_FILES: &[(&str, &str)] = &[
     ("config.json", "config.json"),
 ];
 
-const HF_BASE: &str =
+/// Filer för EmbeddingGemma 2 (Q4 text-backbone)
+const GEMMA_FILES: &[(&str, &str)] = &[
+    ("onnx/model_q4.onnx", "model_q4.onnx"),
+    ("onnx/model_q4.onnx_data", "model_q4.onnx_data"),
+    ("tokenizer.json", "tokenizer.json"),
+];
+
+const HF_BASE_NER: &str =
     "https://huggingface.co/psvensk/bert-base-swedish-cased-ner-onnx/resolve/main";
+const HF_BASE_GEMMA: &str =
+    "https://huggingface.co/onnx-community/embeddinggemma-2-ONNX/resolve/main";
 
 // ── Förkompilerade reguljära uttryck (kompileras en enda gång) ────────────────
 
@@ -67,6 +79,22 @@ static RE_IPV4: LazyLock<Regex> = LazyLock::new(|| {
 static RE_CARD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b\d(?:[\s\-]?\d){12,18}\b").unwrap());
 
+// ── Tekniska hemligheter och nycklar (API-nycklar, tokens, PEM-nycklar) ───────
+static RE_SECRETS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"(?i:-----BEGIN\s+(?:[A-Z\s]+)?PRIVATE\s+KEY-----[\s\S]*?-----END\s+(?:[A-Z\s]+)?PRIVATE\s+KEY-----)",
+        r"|\b(?:sk-[a-zA-Z0-9_-]{20,64})\b",
+        r"|\b(?:ghp_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{40,90})\b",
+        r"|\b(?:xox[baprs]-[0-9a-zA-Z]{10,48})\b",
+        r"|\b(?:AKIA[0-9A-Z]{16})\b",
+        r"|\b(?:AIza[0-9A-Za-z-_]{35})\b",
+        r"|(?:bearer\s+eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,})",
+        r"|(?:(?:postgres|mysql|mongodb(?:\+srv)?):\/\/[^\s:@/]+:[^\s:@/]+@[^\s/]+)",
+        r#"|(?:(?:api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|password|lösenord)\s*[:=]\s*['"]?[A-Za-z0-9_\-.~!@#$%^&*()+=]{8,64}['"]?)"#
+    ))
+    .unwrap()
+});
+
 // ── Event-payloads ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Serialize)]
@@ -87,7 +115,7 @@ struct DownloadProgress {
     total: u64,
 }
 
-// ── Hjälpfunktioner ───────────────────────────────────────────────────────────
+// ── Hjälpfunktioner för kataloger ─────────────────────────────────────────────
 
 fn models_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
@@ -96,6 +124,12 @@ fn models_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| format!("Kan inte hitta app-datakatalog: {e}"))?
         .join("models");
     std::fs::create_dir_all(&dir).map_err(|e| format!("Kan inte skapa modellkatalog: {e}"))?;
+    Ok(dir)
+}
+
+fn gemma_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = models_dir(app)?.join("embeddinggemma2");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Kan inte skapa gemma-katalog: {e}"))?;
     Ok(dir)
 }
 
@@ -111,9 +145,8 @@ fn find_source_model_file(src_dir: &Path, remote_rel: &str, local_name: &str) ->
     None
 }
 
-// ── Kommandon ─────────────────────────────────────────────────────────────────
+// ── KBLab BERT NER Kommandon ──────────────────────────────────────────────────
 
-/// Kontrollerar om alla modellfiler finns lokalt (eller i bundlad resource-mapp).
 #[tauri::command]
 fn models_exist(app: AppHandle) -> Result<bool, String> {
     let data = models_dir(&app)?;
@@ -131,14 +164,12 @@ fn models_exist(app: AppHandle) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Laddar ner modellfilerna från HuggingFace via async streaming.
 #[tauri::command]
 async fn download_model(app: AppHandle) -> Result<(), String> {
     use futures_util::StreamExt;
     use std::io::Write;
 
     let dir = models_dir(&app)?;
-
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(600))
         .build()
@@ -158,7 +189,7 @@ async fn download_model(app: AppHandle) -> Result<(), String> {
         );
 
         let resp = client
-            .get(format!("{HF_BASE}/{remote_rel}"))
+            .get(format!("{HF_BASE_NER}/{remote_rel}"))
             .send()
             .await
             .map_err(|e| format!("Nätverksfel för {local_name}: {e}"))?;
@@ -200,7 +231,6 @@ async fn download_model(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Kopierar modellfiler från en manuellt vald mapp (stöder både platt mapp och `onnx/`-undermapp).
 #[tauri::command]
 async fn load_model_from_dir(src_dir: String, app: AppHandle) -> Result<(), String> {
     let src = PathBuf::from(&src_dir);
@@ -239,7 +269,6 @@ async fn load_model_from_dir(src_dir: String, app: AppHandle) -> Result<(), Stri
     app.emit("model_ready", ()).map_err(|e| e.to_string())
 }
 
-/// Laddar ONNX-modell + tokenizer via ONNX Runtime (~0,15 s kallstart).
 #[tauri::command]
 async fn load_model(app: AppHandle) -> Result<(), String> {
     if SESSION.get().is_some() {
@@ -296,8 +325,152 @@ fn load_and_store(dir: &Path, app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Kör regex + valfri BERT NER på text.
-/// Om endast regex-kategorier har valts körs analysen omedelbart (< 1 ms) även innan AI-modellen laddats.
+// ── EmbeddingGemma 2 Kommandon (Lager 3 AI-Gatekeeper) ────────────────────────
+
+#[tauri::command]
+fn gemma_exists(app: AppHandle) -> Result<bool, String> {
+    let dir = gemma_dir(&app)?;
+    for &(_, local_name) in GEMMA_FILES {
+        if !dir.join(local_name).exists() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+#[tauri::command]
+async fn download_gemma(app: AppHandle) -> Result<(), String> {
+    use futures_util::StreamExt;
+    use std::io::Write;
+
+    let dir = gemma_dir(&app)?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(1200))
+        .build()
+        .map_err(|e| format!("HTTP-klient-fel: {e}"))?;
+
+    for &(remote_rel, local_name) in GEMMA_FILES {
+        let dest = dir.join(local_name);
+        if dest.exists() {
+            continue;
+        }
+
+        let _ = app.emit(
+            "gemma_status",
+            ModelStatus {
+                message: format!("Laddar ner {local_name} (EmbeddingGemma 2)…"),
+            },
+        );
+
+        let resp = client
+            .get(format!("{HF_BASE_GEMMA}/{remote_rel}"))
+            .send()
+            .await
+            .map_err(|e| format!("Nätverksfel för {local_name}: {e}"))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {} för {local_name}", resp.status()));
+        }
+
+        let total = resp.content_length().unwrap_or(0);
+        let tmp = dest.with_extension("part");
+        let mut file = std::fs::File::create(&tmp)
+            .map_err(|e| format!("Kan inte skapa tempfil för {local_name}: {e}"))?;
+        let mut downloaded: u64 = 0;
+        let mut stream = resp.bytes_stream();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| format!("Läsfel för {local_name}: {e}"))?;
+            file.write_all(&chunk)
+                .map_err(|e| format!("Skrivfel för {local_name}: {e}"))?;
+            downloaded += chunk.len() as u64;
+            let _ = app.emit(
+                "gemma_download_progress",
+                DownloadProgress {
+                    file: local_name.to_string(),
+                    downloaded,
+                    total,
+                },
+            );
+        }
+
+        drop(file);
+        if std::fs::rename(&tmp, &dest).is_err() {
+            std::fs::copy(&tmp, &dest)
+                .map_err(|e| format!("Kunde inte flytta {local_name}: {e}"))?;
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn load_gemma(app: AppHandle) -> Result<(), String> {
+    if CLASSIFIER.get().is_some() {
+        app.emit("gemma_ready", ()).map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    let dir = gemma_dir(&app)?;
+    for &(_, local_name) in GEMMA_FILES {
+        if !dir.join(local_name).exists() {
+            return Err(format!(
+                "EmbeddingGemma 2-fil saknas: {local_name}. Ladda ner modellen först."
+            ));
+        }
+    }
+
+    let app_c = app.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let _ = app_c.emit(
+            "gemma_status",
+            ModelStatus {
+                message: "Initierar EmbeddingGemma 2 & beräknar klassificeringsankare…".into(),
+            },
+        );
+        let clf = EmbeddingClassifier::load(&dir)?;
+        let _ = CLASSIFIER.set(clf);
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking-fel: {e}"))??;
+
+    app.emit("gemma_ready", ()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn classify_document(
+    _original_text: String,
+    masked_text: String,
+    active_pii_count: usize,
+    unmasked_pii_count: usize,
+    secret_count: usize,
+    unmasked_secret_count: usize,
+) -> Result<ClassificationReport, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<ClassificationReport, String> {
+        let findings: Vec<ParagraphFinding> = if let Some(clf) = CLASSIFIER.get() {
+            clf.scan_paragraphs(&masked_text)
+        } else {
+            Vec::new()
+        };
+
+        let semantic_available = CLASSIFIER.get().is_some();
+        Ok(build_report(
+            active_pii_count,
+            unmasked_pii_count,
+            secret_count,
+            unmasked_secret_count,
+            semantic_available,
+            findings,
+        ))
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking-fel (classify): {e}"))?
+}
+
+// ── Textanalys ────────────────────────────────────────────────────────────────
+
 #[tauri::command]
 async fn analyze_text(
     text: String,
@@ -313,6 +486,7 @@ async fn analyze_text(
         "Konto/Giro",
         "IP-adress",
         "Kortnummer",
+        "Hemlighet/Nyckel",
     ];
 
     let ner_entities: Vec<String> = entities
@@ -350,8 +524,6 @@ async fn analyze_text(
     .map_err(|e| format!("spawn_blocking-fel: {e}"))?
 }
 
-/// Slår ihop Regex- och NER-träffar. Exakta Regex-träffar vinner alltid vid överlapp
-/// så att t.ex. e-postadresser eller organisationsnummer aldrig dubbelmarkeras.
 fn merge_regex_and_ner(regex_matches: Vec<Match>, ner_matches: Vec<Match>) -> Vec<Match> {
     let mut combined = Vec::with_capacity(regex_matches.len() + ner_matches.len());
     for nm in ner_matches {
@@ -376,8 +548,6 @@ fn merge_regex_and_ner(regex_matches: Vec<Match>, ner_matches: Vec<Match>) -> Ve
     deduped
 }
 
-/// Validerar datumfält i svenskt personnummer eller samordningsnummer (10 eller 12 siffror).
-/// Skiljer automatiskt bort organisationsnummer (som alltid har "månad" >= 20) och slumptal.
 fn valid_swedish_pnr(s: &str) -> bool {
     let digits: Vec<u8> = s
         .bytes()
@@ -400,12 +570,9 @@ fn valid_swedish_pnr(s: &str) -> bool {
     let month = digits[offset + 2] * 10 + digits[offset + 3];
     let day = digits[offset + 4] * 10 + digits[offset + 5];
 
-    // Månad 01–12; dag 01–31 (vanligt personnr) eller 61–91 (samordningsnummer)
     (1..=12).contains(&month) && ((1..=31).contains(&day) || (61..=91).contains(&day))
 }
 
-/// Validerar svenskt organisationsnummer (mittenparet är alltid >= 20 enligt Skatteverket,
-/// eventuellt med sekelprefix 16).
 fn valid_swedish_orgnr(s: &str) -> bool {
     let digits: Vec<u8> = s
         .bytes()
@@ -429,7 +596,6 @@ fn valid_swedish_orgnr(s: &str) -> bool {
     middle >= 20
 }
 
-/// Luhn-algoritmen för kreditkortsnummer (13–19 siffror).
 fn luhn_valid(s: &str) -> bool {
     let nums: Vec<u32> = s
         .chars()
@@ -446,7 +612,11 @@ fn luhn_valid(s: &str) -> bool {
         .map(|(i, &d)| {
             if i % 2 == 1 {
                 let x = d * 2;
-                if x > 9 { x - 9 } else { x }
+                if x > 9 {
+                    x - 9
+                } else {
+                    x
+                }
             } else {
                 d
             }
@@ -463,11 +633,24 @@ fn run_regex(text: &str, requested: &[String]) -> Vec<Match> {
     let has = |name: &str| requested.iter().any(|e| e == name);
     let mut matches = Vec::new();
 
+    // ── Tekniska hemligheter och API-nycklar (högsta prioritet) ──
+    if has("Hemlighet/Nyckel") {
+        for m in RE_SECRETS.find_iter(text) {
+            matches.push(Match {
+                text: m.as_str().to_string(),
+                label: "Hemlighet/Nyckel".to_string(),
+                start: m.start(),
+                end: m.end(),
+                source: "regex".to_string(),
+            });
+        }
+    }
+
     // ── Personnummer / Samordningsnummer ──
     if has("Personnummer") {
         for m in RE_PNR.find_iter(text) {
             let s = m.as_str();
-            if !valid_swedish_pnr(s) {
+            if !valid_swedish_pnr(s) || overlaps_any(&matches, m.start(), m.end()) {
                 continue;
             }
             matches.push(Match {
@@ -638,6 +821,10 @@ pub fn run() {
             download_model,
             load_model,
             load_model_from_dir,
+            gemma_exists,
+            download_gemma,
+            load_gemma,
+            classify_document,
             analyze_text,
             write_file
         ])
@@ -658,6 +845,7 @@ mod tests {
             "Konto/Giro",
             "IP-adress",
             "Kortnummer",
+            "Hemlighet/Nyckel",
         ]
         .into_iter()
         .map(String::from)
@@ -675,6 +863,15 @@ mod tests {
         assert_eq!(res[1].text, "701063-2391");
         assert_eq!(res[2].label, "Org.nummer");
         assert_eq!(res[2].text, "556614-5180");
+    }
+
+    #[test]
+    fn detects_api_keys_and_tokens() {
+        let text = "OpenAI key: sk-abcdef1234567890abcdef123456, GitHub: ghp_123456789012345678901234567890123456";
+        let res = run_regex(text, &all_regex_labels());
+        assert_eq!(res.len(), 2);
+        assert_eq!(res[0].label, "Hemlighet/Nyckel");
+        assert_eq!(res[1].label, "Hemlighet/Nyckel");
     }
 
     #[test]

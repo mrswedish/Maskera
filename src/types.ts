@@ -15,3 +15,33 @@ export interface TranslationEntry {
 }
 
 export type TranslationTable = Map<string, TranslationEntry>;
+
+export interface ParagraphFinding {
+  paragraph_index: number;
+  preview: string;
+  start: number;
+  end: number;
+  category: string;
+  axis: "integritet" | "affär" | "säkerhet" | string;
+  severity: "high" | "medium" | string;
+  confidence: number;
+  reason: string;
+}
+
+export type SafetyVerdict =
+  | "safe"
+  | "mask_required"
+  | "caution_after_mask"
+  | "do_not_share";
+
+export interface ClassificationReport {
+  verdict_before_mask: SafetyVerdict;
+  verdict_after_mask: SafetyVerdict;
+  summary_before: string;
+  summary_after: string;
+  active_pii_count: number;
+  unmasked_pii_count: number;
+  secret_count: number;
+  semantic_available: boolean;
+  findings: ParagraphFinding[];
+}

@@ -1,35 +1,38 @@
 # Maskera
 
-Maskera är ett lokalt verktyg för automatisk identifiering och maskering av personuppgifter (PII) i svenska texter. Allt körs på din dator — ingen data skickas till externa tjänster.
+Maskera är ett lokalt verktyg för automatisk identifiering och maskering av personuppgifter (PII), hemligheter och känslig kontext i svenska texter samt återställning av AI-svar. Allt körs 100 % lokalt på din dator — ingen data skickas någonsin till molnet.
 
 ---
 
 ## Vad gör det?
 
-Ladda upp en `.txt`-fil, välj vilka entitetstyper som ska sökas, och låt verktyget:
+Klistra in text från urklipp (`Ctrl+V`), skriv direkt eller öppna en `.txt`-fil, välj snabbprofil och låt verktyget:
 
-1. **Identifiera** personuppgifter med regelbaserad sökning (regex) och AI (BERT NER)
-2. **Markera** träffarna i texten med färgkodning per kategori
-3. **Granska** och justera — avmarkera felaktiga träffar eller lägg till ord manuellt
-4. **Exportera** en maskerad version av texten samt en översättningstabell
+1. **Identifiera personuppgifter och hemligheter** via förkompilerade reguljära uttryck och AI (svensk BERT NER).
+2. **Bedöma AI-delningsrisk (Lager 3)** med semantisk klassificering via EmbeddingGemma 2 och hemlighetsdetektering — ger trafikljusindikering för om texten är säker att klistra in i en extern AI-tjänst före och efter maskering.
+3. **Granska och justera** — undanta/avmaskera specifika ord med ett enkelt klick eller lägg till egna termer manuellt.
+4. **Exportera eller kopiera** maskerad text med 1-klick samt spara översättningstabell (JSON/TXT).
+5. **Avmaskera AI-svar (Tab 3)** — klistra in svaret från ChatGPT/Claude/Gemini så återställs alla platshållare (`[PERSON A]`, `[ORGANISATION A]`) lokalt till originalvärdena.
 
 ### Vad detekteras?
 
 | Kategori | Metod | Exempel |
 |---|---|---|
-| Personnummer | Regex | `850515-1234` |
+| Hemlighet/Nyckel | Regex | API-nycklar (`sk-...`, `AIza...`, `ghp_...`, `AKIA...`, `xox...`), JWT tokens, PEM privata nycklar, databasanslutningar |
+| Personnummer | Regex | `850515-1234`, `701063-2391` (samordningsnummer) |
 | E-postadress | Regex | `namn@example.se` |
 | Telefonnummer | Regex | `+46 8 123 45 67`, `08-123-45-67` |
-| Organisationsnummer | Regex | `556614-5180` |
+| Organisationsnummer | Regex | `556614-5180` (skiljs automatiskt från personnummer) |
 | Konto/Giro | Regex | IBAN `SE9550000000054910000003`, Bankgiro `5402-1234`, Plusgiro `12345-6` |
 | IP-adress | Regex | `8.8.8.8` (publika; privata nät 10.x, 192.168.x m.fl. filtreras bort) |
-| Kortnummer | Regex + Luhn | `4532-1234-5678-9123` (Visa/Mastercard/Amex, valideras med Luhn-algoritmen) |
+| Kortnummer | Regex + Luhn | `4532-1234-5678-9123` (Visa/Mastercard/Amex, valideras med Luhn) |
 | Person | AI (BERT) | `Anders Andersson` |
 | Organisation | AI (BERT) | `Försäkringskassan` |
 | Plats | AI (BERT) | `Stockholm` |
 | Övrigt | AI (BERT) | Diverse namngivna entiteter |
-| Tid | AI (BERT) | `idag`, `fem år` *(av som standard)* |
-| Händelse | AI (BERT) | `coronapandemin` *(av som standard)* |
+| Tid | AI (BERT) | `idag`, `fem år` |
+| Händelse | AI (BERT) | `coronapandemin` |
+| Känslig kontext | AI (EmbeddingGemma 2) | GDPR Art. 9/10 (hälsa, vård, lagöverträdelser), företagshemligheter/M&A, IT-säkerhet |
 
 Alla kategorier kan slås av/på individuellt i vänsterpanelen.
 

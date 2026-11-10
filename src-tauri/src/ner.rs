@@ -14,7 +14,7 @@ use tokenizers::{Encoding, Tokenizer};
 
 static ORT_ENV: OnceLock<Result<Environment, String>> = OnceLock::new();
 
-fn get_ort_env() -> Result<&'static Environment, String> {
+pub(crate) fn get_ort_env() -> Result<&'static Environment, String> {
     ORT_ENV
         .get_or_init(|| {
             ort::init()
