@@ -6,13 +6,16 @@ Maskera är ett snabbt, helt lokalt skrivbordsverktyg för automatisk identifier
 
 ## Gränssnitt & arbetsflöde
 
-### 1. Granska, maskera och kontrollera känsliga avsnitt (Ljust tema)
+### 1. Ren startvy före granskning
+![Maskera ren startvy före granskning med verktygsrad, snabbprofiler och inklistrings-/dra-och-släpp-yta](docs/screenshots/maskera-start-light.png)
+
+### 2. Granska, maskera och kontrollera känsliga avsnitt (Ljust tema)
 ![Maskera granskningsvy med AI-gatekeeper, röd och gul avsnittsmarkering samt maskerade personuppgifter](docs/screenshots/maskera-granskning-light.png)
 
-### 2. Återställ (avmaskera) AI-svar med dokumentformatering (Mörkt tema)
+### 3. Återställ (avmaskera) AI-svar med dokumentformatering (Mörkt tema)
 ![Maskera vy för att avmaskera AI-svar i mörkt tema med formaterad förhandsvisning redo för Word och Outlook](docs/screenshots/maskera-avmaskera-dark.png)
 
-> **Interaktiv HTML-förhandsvisning:** Filen [`docs/screenshots/maskera-ui-demo.html`](docs/screenshots/maskera-ui-demo.html) är en fristående HTML-dump som använder applikationens faktiska stilmall (`src/index.css`) och kan öppnas direkt i en webbläsare för att klicka mellan flikarna (*Text & Maskering*, *Översättningstabell*, *Avmaskera AI-svar*) samt växla mellan **Ljust** och **Mörkt** tema.
+> **Interaktiv HTML-förhandsvisning:** Filen [`docs/screenshots/maskera-ui-demo.html`](docs/screenshots/maskera-ui-demo.html) är en fristående HTML-dump som använder applikationens faktiska stilmall (`src/index.css`) och kan öppnas direkt i en webbläsare (även med `?view=empty`, `?view=mask`, `?view=table` eller `?view=unmask`) för att testa vyerna samt växla mellan **Ljust** och **Mörkt** tema.
 
 ---
 

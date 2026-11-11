@@ -8,7 +8,10 @@
     <title>Maskera — Interaktiv HTML-förhandsvisning av gränssnittet</title>
     <link rel="stylesheet" href="../../src/index.css" />
     <style>
-      svg[hidden] {
+      svg[hidden],
+      .panel-inner[hidden],
+      .gatekeeper-banner[hidden],
+      .tab-badge[hidden] {
         display: none;
       }
     </style>
@@ -98,7 +101,7 @@
         <span role="separator" aria-orientation="vertical" class="tb-sep"></span>
 
         <div role="group" aria-label="Analys" class="toolbar-group toolbar-group-end">
-          <button type="button" class="tb-btn-primary">
+          <button type="button" class="tb-btn-primary" id="analyze-btn">
             <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z" />
             </svg>
@@ -205,20 +208,20 @@
                 <path d="M14 2v4a2 2 0 0 0 2 2h4" /><path d="M10 9H8" /><path d="M16 13H8" /><path d="M16 17H8" />
               </svg>
               <span>Text &amp; Maskering</span>
-              <span class="tab-badge">8</span>
+              <span class="tab-badge" id="badge-mask">8</span>
             </button>
             <button type="button" id="tab-table" aria-selected="false" class="tab-trigger">
               <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M12 3v18" /><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M3 9h18" /><path d="M3 15h18" />
               </svg>
               <span>Översättningstabell</span>
-              <span class="tab-badge">6</span>
+              <span class="tab-badge" id="badge-table">6</span>
             </button>
           </div>
 
           <div class="workspace-ai-actions">
             <span class="copy-wrapper">
-              <button type="button" class="tb-btn-copy">
+              <button type="button" class="tb-btn-copy" id="copy-masked-btn">
                 <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
                   <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
@@ -232,14 +235,44 @@
                 <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" />
               </svg>
               <span>Avmaskera AI-svar</span>
-              <span class="tab-badge">6</span>
+              <span class="tab-badge" id="badge-unmask">6</span>
             </button>
           </div>
         </div>
 
         <!-- Flik 1: Text & Maskering -->
         <div role="tabpanel" aria-labelledby="tab-mask" id="panel-mask" class="tab-panel">
-          <div class="panel-inner">
+          <!-- Ren startvy före granskning (?view=empty) -->
+          <div class="panel-inner" id="empty-mask-inner" hidden>
+            <div class="textarea-wrapper">
+              <label for="empty-editor-demo" class="visually-hidden">Källtext att granska och maskera</label>
+              <textarea
+                id="empty-editor-demo"
+                class="editor-textarea"
+                placeholder="Klistra in text här (Ctrl+V), skriv direkt, eller dra och släpp Word (.docx), Excel (.xlsx), PDF (.pdf) eller textfil..."
+              ></textarea>
+              <div class="editor-empty-hint">
+                <svg aria-hidden="true" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <rect width="8" height="4" x="8" y="2" rx="1" ry="1" />
+                  <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+                </svg>
+                <p>Klistra in text (Ctrl+V) eller dra och släpp Word (.docx), Excel (.xlsx), PDF (.pdf) eller .txt här</p>
+              </div>
+            </div>
+            <div class="tab-footer">
+              <span class="footer-stats"></span>
+              <div class="footer-actions">
+                <button type="button" class="tb-btn" disabled>
+                  <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" x2="12" y1="15" y2="3" />
+                  </svg>
+                  <span>Spara maskerad .txt</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel-inner" id="analyzed-mask-inner">
             <div class="review-viewer-wrapper">
               <div class="review-viewer-header">
                 <span class="review-viewer-hint">
@@ -526,6 +559,13 @@ Vid avstämningen på **[ORGANISATION A]** i **[PLATS A]** kom **[PERSON A]** oc
         const panelTable = document.getElementById("panel-table");
         const panelUnmask = document.getElementById("panel-unmask");
         const gatekeeperBox = document.getElementById("gatekeeper-box");
+        const emptyInner = document.getElementById("empty-mask-inner");
+        const analyzedInner = document.getElementById("analyzed-mask-inner");
+        const analyzeBtn = document.getElementById("analyze-btn");
+        const copyMaskedBtn = document.getElementById("copy-masked-btn");
+        const badgeMask = document.getElementById("badge-mask");
+        const badgeTable = document.getElementById("badge-table");
+        const badgeUnmask = document.getElementById("badge-unmask");
 
         function syncThemeUI() {
           const isDark = meta.getAttribute("content") === "dark";
@@ -535,7 +575,8 @@ Vid avstämningen på **[ORGANISATION A]** i **[PLATS A]** kom **[PERSON A]** oc
         }
 
         function setView(view) {
-          const isMask = view === "mask";
+          const isEmpty = view === "empty";
+          const isMask = view === "mask" || isEmpty;
           const isTable = view === "table";
           const isUnmask = view === "unmask";
 
@@ -548,6 +589,19 @@ Vid avstämningen på **[ORGANISATION A]** i **[PLATS A]** kom **[PERSON A]** oc
           panelMask.hidden = !isMask;
           panelTable.hidden = !isTable;
           panelUnmask.hidden = !isUnmask;
+
+          emptyInner.hidden = !isEmpty;
+          analyzedInner.hidden = isEmpty;
+          gatekeeperBox.hidden = isEmpty;
+          badgeMask.hidden = isEmpty;
+          badgeTable.hidden = isEmpty;
+          badgeUnmask.hidden = isEmpty;
+          copyMaskedBtn.disabled = isEmpty;
+          if (isEmpty) {
+            analyzeBtn.setAttribute("aria-disabled", "true");
+          } else {
+            analyzeBtn.removeAttribute("aria-disabled");
+          }
 
           // Vid Avmaskera-vy minimerar vi listan i Gatekeeper för mer yta till AI-svaret
           const details = gatekeeperBox.querySelector("details");
@@ -562,6 +616,7 @@ Vid avstämningen på **[ORGANISATION A]** i **[PLATS A]** kom **[PERSON A]** oc
           syncThemeUI();
         });
 
+        analyzeBtn.addEventListener("click", function () { setView("mask"); });
         tabMask.addEventListener("click", function () { setView("mask"); });
         tabTable.addEventListener("click", function () { setView("table"); });
         tabUnmask.addEventListener("click", function () {
@@ -571,7 +626,7 @@ Vid avstämningen på **[ORGANISATION A]** i **[PLATS A]** kom **[PERSON A]** oc
 
         const params = new URLSearchParams(window.location.search);
         const initialView = params.get("view");
-        if (initialView === "unmask" || initialView === "table" || initialView === "mask") {
+        if (initialView === "empty" || initialView === "unmask" || initialView === "table" || initialView === "mask") {
           setView(initialView);
         }
         syncThemeUI();
