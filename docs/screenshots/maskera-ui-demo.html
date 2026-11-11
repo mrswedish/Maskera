@@ -1,0 +1,581 @@
+<!doctype html>
+<html lang="sv">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- MANDATORY (MWG dark-mode): deklarera stöd för både ljust och mörkt tema direkt i <head> -->
+    <meta name="color-scheme" content="light" id="color-scheme-meta" />
+    <title>Maskera — Interaktiv HTML-förhandsvisning av gränssnittet</title>
+    <link rel="stylesheet" href="../../src/index.css" />
+    <style>
+      svg[hidden] {
+        display: none;
+      }
+    </style>
+    <script>
+      // Tillåt direktval av tema (?theme=dark|light) före första rendering (undviker FOUC)
+      (function () {
+        const params = new URLSearchParams(window.location.search);
+        const theme = params.get("theme");
+        const meta = document.getElementById("color-scheme-meta");
+        if (meta && (theme === "dark" || theme === "light")) {
+          meta.setAttribute("content", theme);
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div class="maskera-root">
+      <!-- 1. Kompakt sidhuvud -->
+      <header class="top-header">
+        <div class="header-brand">
+          <div class="brand-logo" aria-hidden="true">
+            <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
+            </svg>
+          </div>
+          <div class="brand-titles">
+            <h1 class="brand-title">Maskera</h1>
+            <span class="brand-tagline">Lokal avidentifiering för AI</span>
+          </div>
+        </div>
+
+        <div class="header-status-pills">
+          <span class="status-pill ready" title="BERT NER: Aktiv · EmbeddingGemma 2: Aktiv">
+            <span>Lokal AI redo</span>
+          </span>
+
+          <button type="button" class="theme-toggle-btn" id="theme-toggle">
+            <svg id="icon-moon" aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+            </svg>
+            <svg id="icon-sun" hidden aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="4" />
+              <path d="M12 2v2M12 20v2m-7.07-17.07 1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+            </svg>
+            <span id="theme-label">Mörkt</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- 2. Kompakt verktygsrad -->
+      <div role="toolbar" focusgroup="toolbar wrap" aria-label="Dokument och filter" class="action-toolbar">
+        <div role="group" aria-label="Inmatning" class="toolbar-group">
+          <button type="button" class="tb-btn">
+            <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect width="8" height="4" x="8" y="2" rx="1" ry="1" />
+              <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+            </svg>
+            <span>Klistra in</span>
+          </button>
+          <button type="button" class="tb-btn">
+            <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="17 8 12 3 7 8" />
+              <line x1="12" x2="12" y1="3" y2="15" />
+            </svg>
+            <span>Öppna dokument</span>
+          </button>
+        </div>
+
+        <span role="separator" aria-orientation="vertical" class="tb-sep"></span>
+
+        <div role="group" aria-label="Profiler och filter" class="toolbar-group">
+          <button type="button" class="tb-preset-btn" aria-pressed="true">AI-säker</button>
+          <button type="button" class="tb-preset-btn" aria-pressed="false">Endast ID &amp; kontakt</button>
+          <button type="button" class="tb-preset-btn" aria-pressed="false">Strikt (Allt)</button>
+          <button type="button" class="tb-preset-btn tb-filter-btn" aria-pressed="false">
+            <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="4" x2="4" y1="21" y2="14" /><line x1="4" x2="4" y1="10" y2="3" />
+              <line x1="12" x2="12" y1="21" y2="12" /><line x1="12" x2="12" y1="8" y2="3" />
+              <line x1="20" x2="20" y1="21" y2="16" /><line x1="20" x2="20" y1="12" y2="3" />
+              <line x1="2" x2="6" y1="14" y2="14" /><line x1="10" x2="14" y1="8" y2="8" /><line x1="18" x2="22" y1="16" y2="16" />
+            </svg>
+            <span>Filter</span>
+          </button>
+        </div>
+
+        <span role="separator" aria-orientation="vertical" class="tb-sep"></span>
+
+        <div role="group" aria-label="Analys" class="toolbar-group toolbar-group-end">
+          <button type="button" class="tb-btn-primary">
+            <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z" />
+            </svg>
+            <span>Granska &amp; Maskera</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- 3. AI-Gatekeeper (Lager 3: EmbeddingGemma 2) -->
+      <div class="gatekeeper-banner badge-caution" id="gatekeeper-box">
+        <div class="gatekeeper-header">
+          <div class="gatekeeper-badge" title="BERT + Regex: 184 ms · EmbeddingGemma 2: 5 avsnitt på 640 ms">
+            <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
+              <path d="M12 9v4" /><path d="M12 17h.01" />
+            </svg>
+            <strong>Efter maskering: Granska före delning</strong>
+            <span class="gatekeeper-summary-inline">
+              — Direkta namn och identifierare är maskerade, men 2 avsnitt innehåller sakuppgifter (vård/hälsa och personalärende) som bör granskas före delning.
+            </span>
+          </div>
+          <div class="gatekeeper-meta">
+            <span class="before-status">Före: <em>Dela ej i öppen AI</em></span>
+          </div>
+        </div>
+
+        <details class="gatekeeper-findings-details" open>
+          <summary class="gatekeeper-findings-summary">
+            <span>Visa 2 flaggade avsnitt i listvy</span>
+            <span class="summary-sev-pills">
+              <span class="sev-pill high">
+                <svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="10" /><path d="m15 9-6 6" /><path d="m9 9 6 6" />
+                </svg>
+                <span>1 röd · Hög känslighet</span>
+              </span>
+              <span class="sev-pill medium">
+                <svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
+                  <path d="M12 9v4" /><path d="M12 17h.01" />
+                </svg>
+                <span>1 gul · Gränsfall</span>
+              </span>
+            </span>
+            <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="details-chevron">
+              <path d="m6 9 6 6 6-6" />
+            </svg>
+          </summary>
+          <ul class="findings-list" role="list">
+            <li class="finding-item high">
+              <div class="finding-item-row">
+                <button type="button" class="finding-item-btn">
+                  <span class="sev-pill high">
+                    <svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                      <circle cx="12" cy="12" r="10" /><path d="m15 9-6 6" /><path d="m9 9 6 6" />
+                    </svg>
+                    <span>Hög känslighet</span>
+                  </span>
+                  <span class="finding-category">Avsnitt 2 · Hälsa &amp; Vård (GDPR Art. 9)</span>
+                  <span class="finding-preview">”Patienten har varit sjukskriven på heltid sedan oktober efter utmattningssyndrom…”</span>
+                  <span class="finding-jump-link">Visa i text →</span>
+                </button>
+                <button type="button" class="finding-dismiss-btn">
+                  <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M20 6 9 17l-5-5" />
+                  </svg>
+                  <span>Klarmarkera<span class="visually-hidden"> avsnitt 2</span></span>
+                </button>
+              </div>
+            </li>
+            <li class="finding-item medium">
+              <div class="finding-item-row">
+                <button type="button" class="finding-item-btn">
+                  <span class="sev-pill medium">
+                    <svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
+                      <path d="M12 9v4" /><path d="M12 17h.01" />
+                    </svg>
+                    <span>Gränsfall</span>
+                  </span>
+                  <span class="finding-category">Avsnitt 3 · HR &amp; Personalärende</span>
+                  <span class="finding-preview">”Vid uppföljningssamtalet med [PERSON B] diskuterades successiv återgång till 50 %…”</span>
+                  <span class="finding-jump-link">Visa i text →</span>
+                </button>
+                <button type="button" class="finding-dismiss-btn">
+                  <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M20 6 9 17l-5-5" />
+                  </svg>
+                  <span>Klarmarkera<span class="visually-hidden"> avsnitt 3</span></span>
+                </button>
+              </div>
+            </li>
+          </ul>
+        </details>
+      </div>
+
+      <!-- 4. Arbetsyta: Dokumentflikar till vänster, Kopiera maskerad + Avmaskera AI-svar till höger -->
+      <main class="main-workspace">
+        <div class="tabs-nav">
+          <div focusgroup="tablist nomemory" aria-label="Dokumentvyer" class="tabs-list">
+            <button type="button" id="tab-mask" aria-selected="true" focusgroupstart class="tab-trigger">
+              <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+                <path d="M14 2v4a2 2 0 0 0 2 2h4" /><path d="M10 9H8" /><path d="M16 13H8" /><path d="M16 17H8" />
+              </svg>
+              <span>Text &amp; Maskering</span>
+              <span class="tab-badge">8</span>
+            </button>
+            <button type="button" id="tab-table" aria-selected="false" class="tab-trigger">
+              <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 3v18" /><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M3 9h18" /><path d="M3 15h18" />
+              </svg>
+              <span>Översättningstabell</span>
+              <span class="tab-badge">6</span>
+            </button>
+          </div>
+
+          <div class="workspace-ai-actions">
+            <span class="copy-wrapper">
+              <button type="button" class="tb-btn-copy">
+                <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+                  <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+                </svg>
+                <span>Kopiera maskerad</span>
+              </button>
+            </span>
+
+            <button type="button" id="tab-unmask" aria-pressed="false" class="unmask-nav-btn">
+              <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" />
+              </svg>
+              <span>Avmaskera AI-svar</span>
+              <span class="tab-badge">6</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Flik 1: Text & Maskering -->
+        <div role="tabpanel" aria-labelledby="tab-mask" id="panel-mask" class="tab-panel">
+          <div class="panel-inner">
+            <div class="review-viewer-wrapper">
+              <div class="review-viewer-header">
+                <span class="review-viewer-hint">
+                  Klicka på en markering för att undanta, eller klicka i ett stycke för att redigera.
+                </span>
+                <div class="review-header-actions">
+                  <button type="button" class="tb-preset-btn para-toggle-btn has-high" aria-pressed="true">
+                    <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
+                      <path d="M12 9v4" /><path d="M12 17h.01" />
+                    </svg>
+                    <span>Känsliga avsnitt (2)</span>
+                  </button>
+                  <button type="button" class="edit-source-btn" aria-pressed="false">
+                    <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" />
+                    </svg>
+                    <span>Ändra källtext</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="review-viewer-content">
+                <div class="doc-para doc-para-editable">
+                  <div class="doc-heading doc-heading-2">Sammanställning inför avstämningsmöte (fiktivt exempel)</div>
+                  <div class="doc-bullet-item">
+                    <span class="doc-bullet-dot" aria-hidden="true">•</span>
+                    <span class="doc-bullet-content"><strong>Deltagare:</strong> <mark class="highlight-chip" style="background-color: #5b21b6">Anna Lindberg<span class="entity-tag">[PERSON A]</span></mark> (<mark class="highlight-chip" style="background-color: #b91c1c">840312-4821<span class="entity-tag">[PERSONNUMMER 1]</span></mark>) samt enhetschef <mark class="highlight-chip" style="background-color: #5b21b6">Erik Holm<span class="entity-tag">[PERSON B]</span></mark>, <mark class="highlight-chip" style="background-color: #047857">Vårdcentralen Eken<span class="entity-tag">[ORGANISATION A]</span></mark> i <mark class="highlight-chip" style="background-color: #9d174d">Jönköping<span class="entity-tag">[PLATS A]</span></mark>.</span>
+                  </div>
+                  <div class="doc-bullet-item">
+                    <span class="doc-bullet-dot" aria-hidden="true">•</span>
+                    <span class="doc-bullet-content"><strong>Kontakt &amp; rutin:</strong> <mark class="highlight-chip" style="background-color: #1d4ed8">anna.lindberg@vardcentralen-eken.se<span class="entity-tag">[E-POST 1]</span></mark> · Intern blankett: <mark class="highlight-chip" style="background-color: #9f1239">https://intranat.regionvatterdalen.se/rehab-rutin<span class="entity-tag">[HEMLIGHET/NYCKEL 1]</span></mark></span>
+                  </div>
+                </div>
+
+                <!-- Rött avsnitt (Hög känslighet) -->
+                <div class="flagged-para-block severity-high">
+                  <div class="flagged-para-header">
+                    <div class="flagged-para-top-row">
+                      <span class="flagged-para-title">
+                        <span class="sev-pill high">
+                          <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="10" /><path d="m15 9-6 6" /><path d="m9 9 6 6" />
+                          </svg>
+                          <span>Hög känslighet</span>
+                        </span>
+                        <span>Avsnitt 2 · Hälsa &amp; Vård (GDPR Art. 9)</span>
+                      </span>
+                      <span class="flagged-para-meta">
+                        <button type="button" class="flagged-action-btn">
+                          <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" />
+                          </svg>
+                          <span>Redigera<span class="visually-hidden"> avsnitt 2</span></span>
+                        </button>
+                        <button type="button" class="flagged-action-btn approve">
+                          <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M20 6 9 17l-5-5" />
+                          </svg>
+                          <span>Klarmarkera<span class="visually-hidden"> avsnitt 2</span></span>
+                        </button>
+                      </span>
+                    </div>
+                    <p class="flagged-para-explain">
+                      <strong>Röd (84% träffstyrka): </strong>Beskriver enskild persons medicinska tillstånd, diagnos, behandling eller vårdkontakt som kan röja känsliga personuppgifter även utan namn. Stark koppling — kontrollera att inga känsliga sakdetaljer röjs, eller klarmarkera efter granskning.
+                    </p>
+                  </div>
+                  <div class="flagged-para-body">
+                    <div class="doc-para doc-para-in-card">
+                      <div class="doc-line">Patienten <mark class="highlight-chip" style="background-color: #5b21b6">Anna Lindberg<span class="entity-tag">[PERSON A]</span></mark> har varit sjukskriven på heltid sedan oktober efter utmattningssyndrom och pågående samtalsbehandling via företagshälsovården.</div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Gult avsnitt (Gränsfall) -->
+                <div class="flagged-para-block severity-medium">
+                  <div class="flagged-para-header">
+                    <div class="flagged-para-top-row">
+                      <span class="flagged-para-title">
+                        <span class="sev-pill medium">
+                          <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
+                            <path d="M12 9v4" /><path d="M12 17h.01" />
+                          </svg>
+                          <span>Gränsfall</span>
+                        </span>
+                        <span>Avsnitt 3 · HR &amp; Personalärende</span>
+                      </span>
+                      <span class="flagged-para-meta">
+                        <button type="button" class="flagged-action-btn">
+                          <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" />
+                          </svg>
+                          <span>Redigera<span class="visually-hidden"> avsnitt 3</span></span>
+                        </button>
+                        <button type="button" class="flagged-action-btn approve">
+                          <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M20 6 9 17l-5-5" />
+                          </svg>
+                          <span>Klarmarkera<span class="visually-hidden"> avsnitt 3</span></span>
+                        </button>
+                      </span>
+                    </div>
+                    <p class="flagged-para-explain">
+                      <strong>Gul (68% träffstyrka): </strong>Innehåller bedömning av enskild medarbetare/kandidat, individuell lön, arbetsrättsligt ärende eller rehabilitering. Svagare gränsfallsträff — ögna igenom och klarmarkera om innehållet är ofarligt.
+                    </p>
+                  </div>
+                  <div class="flagged-para-body">
+                    <div class="doc-para doc-para-in-card">
+                      <div class="doc-line">Vid uppföljningssamtalet med <mark class="highlight-chip" style="background-color: #5b21b6">Erik Holm<span class="entity-tag">[PERSON B]</span></mark> diskuterades successiv återgång till 50 % tjänstgöring med anpassade administrativa arbetsuppgifter under fyra veckor.</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="tab-footer">
+              <span class="footer-stats">
+                <strong>rehab_underlag.docx</strong> (Word-dokument) · 642 tecken · 84 ord · <strong>8</strong> maskerade uppgifter
+              </span>
+              <div class="footer-actions">
+                <button type="button" class="tb-btn">
+                  <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" x2="12" y1="15" y2="3" />
+                  </svg>
+                  <span>Spara maskerad .docx</span>
+                </button>
+                <button type="button" class="tb-btn">
+                  <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" x2="12" y1="15" y2="3" />
+                  </svg>
+                  <span>Spara maskerad .txt</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Flik 2: Översättningstabell -->
+        <div role="tabpanel" aria-labelledby="tab-table" id="panel-table" hidden class="tab-panel">
+          <div class="panel-inner">
+            <div class="table-wrapper">
+              <table class="custom-table">
+                <caption class="visually-hidden">Översättningstabell mellan maskerade platshållare och originalvärden</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Typ</th>
+                    <th scope="col">Platshållare (Maskerad)</th>
+                    <th scope="col">Originalvärde i text</th>
+                    <th scope="col">Förekomster</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><span class="entity-dot" style="background-color: #5b21b6"></span><span class="entity-type-name">Person</span></td>
+                    <td><code class="placeholder-tag">[PERSON A]</code></td>
+                    <td class="orig-cell">Anna Lindberg</td>
+                    <td class="count-cell">2</td>
+                  </tr>
+                  <tr>
+                    <td><span class="entity-dot" style="background-color: #b91c1c"></span><span class="entity-type-name">Personnummer</span></td>
+                    <td><code class="placeholder-tag">[PERSONNUMMER 1]</code></td>
+                    <td class="orig-cell">840312-4821</td>
+                    <td class="count-cell">1</td>
+                  </tr>
+                  <tr>
+                    <td><span class="entity-dot" style="background-color: #5b21b6"></span><span class="entity-type-name">Person</span></td>
+                    <td><code class="placeholder-tag">[PERSON B]</code></td>
+                    <td class="orig-cell">Erik Holm</td>
+                    <td class="count-cell">2</td>
+                  </tr>
+                  <tr>
+                    <td><span class="entity-dot" style="background-color: #047857"></span><span class="entity-type-name">Organisation</span></td>
+                    <td><code class="placeholder-tag">[ORGANISATION A]</code></td>
+                    <td class="orig-cell">Vårdcentralen Eken</td>
+                    <td class="count-cell">1</td>
+                  </tr>
+                  <tr>
+                    <td><span class="entity-dot" style="background-color: #9d174d"></span><span class="entity-type-name">Plats</span></td>
+                    <td><code class="placeholder-tag">[PLATS A]</code></td>
+                    <td class="orig-cell">Jönköping</td>
+                    <td class="count-cell">1</td>
+                  </tr>
+                  <tr>
+                    <td><span class="entity-dot" style="background-color: #1d4ed8"></span><span class="entity-type-name">E-post</span></td>
+                    <td><code class="placeholder-tag">[E-POST 1]</code></td>
+                    <td class="orig-cell">anna.lindberg@vardcentralen-eken.se</td>
+                    <td class="count-cell">1</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="tab-footer">
+              <span class="footer-stats">6 unika värden mappade lokalt i RAM</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Vy 3: Avmaskera AI-svar -->
+        <div role="region" aria-labelledby="tab-unmask" id="panel-unmask" hidden class="tab-panel">
+          <div class="panel-inner unmask-grid">
+            <div class="unmask-col">
+              <label class="unmask-label" for="ai-reply-demo">
+                <span>1. Klistra in svaret du fick från AI-tjänsten:</span>
+                <textarea id="ai-reply-demo" class="editor-textarea" readonly>### Förslag på mötesanteckning &amp; åtgärdsplan
+
+Vid avstämningen på **[ORGANISATION A]** i **[PLATS A]** kom **[PERSON A]** och enhetschef **[PERSON B]** överens om följande steg:
+
+- **Anpassad tjänstgöring:** Successiv upptrappning till 50 % med fokus på administrativa uppgifter under fyra veckor.
+- **Uppföljning:** Ny avstämning bokas om tre veckor. Bekräftelse skickas till **[E-POST 1]**.
+- **Dokumentation:** Underlaget registreras enligt intern rutin (`[HEMLIGHET/NYCKEL 1]`).</textarea>
+              </label>
+            </div>
+
+            <div class="unmask-col">
+              <div class="unmask-header-row">
+                <span class="unmask-label-text">2. Avmaskerat svar (återställt med originalvärden):</span>
+                <div class="unmask-header-actions">
+                  <button type="button" class="tb-preset-btn unmask-format-toggle" aria-pressed="true">
+                    <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" /><path d="M14 2v4a2 2 0 0 0 2 2h4" />
+                    </svg>
+                    <span>Formaterad vy</span>
+                  </button>
+                  <span class="copy-wrapper">
+                    <button type="button" class="tb-btn-copy">
+                      <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+                        <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+                      </svg>
+                      <span>Kopiera svar</span>
+                    </button>
+                  </span>
+                </div>
+              </div>
+
+              <div class="unmasked-preview-box formatted-mode">
+                <div class="formatted-md">
+                  <h3 class="md-h3">Förslag på mötesanteckning &amp; åtgärdsplan</h3>
+                  <p class="md-para">
+                    Vid avstämningen på <strong>Vårdcentralen Eken</strong> i <strong>Jönköping</strong> kom <strong>Anna Lindberg</strong> och enhetschef <strong>Erik Holm</strong> överens om följande steg:
+                  </p>
+                  <ul class="md-list">
+                    <li><strong>Anpassad tjänstgöring:</strong> Successiv upptrappning till 50 % med fokus på administrativa uppgifter under fyra veckor.</li>
+                    <li><strong>Uppföljning:</strong> Ny avstämning bokas om tre veckor. Bekräftelse skickas till <strong>anna.lindberg@vardcentralen-eken.se</strong>.</li>
+                    <li><strong>Dokumentation:</strong> Underlaget registreras enligt intern rutin (<code class="inline-doc-code">https://intranat.regionvatterdalen.se/rehab-rutin</code>).</li>
+                  </ul>
+                </div>
+              </div>
+
+              <div class="unmask-status-bar">
+                <span>
+                  <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M20 6 9 17l-5-5" />
+                  </svg>
+                  <strong>6</strong> platshållare återställda lokalt (redo för Word / Outlook)
+                </span>
+                <span class="tb-btn">
+                  <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" x2="12" y1="3" y2="15" />
+                  </svg>
+                  <span>Avmaskera .docx / .xlsx-fil</span>
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      (function () {
+        const meta = document.getElementById("color-scheme-meta");
+        const themeBtn = document.getElementById("theme-toggle");
+        const themeLabel = document.getElementById("theme-label");
+        const iconMoon = document.getElementById("icon-moon");
+        const iconSun = document.getElementById("icon-sun");
+
+        const tabMask = document.getElementById("tab-mask");
+        const tabTable = document.getElementById("tab-table");
+        const tabUnmask = document.getElementById("tab-unmask");
+
+        const panelMask = document.getElementById("panel-mask");
+        const panelTable = document.getElementById("panel-table");
+        const panelUnmask = document.getElementById("panel-unmask");
+        const gatekeeperBox = document.getElementById("gatekeeper-box");
+
+        function syncThemeUI() {
+          const isDark = meta.getAttribute("content") === "dark";
+          themeLabel.textContent = isDark ? "Ljust" : "Mörkt";
+          iconMoon.toggleAttribute("hidden", isDark);
+          iconSun.toggleAttribute("hidden", !isDark);
+        }
+
+        function setView(view) {
+          const isMask = view === "mask";
+          const isTable = view === "table";
+          const isUnmask = view === "unmask";
+
+          tabMask.setAttribute("aria-selected", String(isMask));
+          tabTable.setAttribute("aria-selected", String(isTable));
+          tabMask.toggleAttribute("focusgroupstart", !isTable);
+          tabTable.toggleAttribute("focusgroupstart", isTable);
+          tabUnmask.setAttribute("aria-pressed", String(isUnmask));
+
+          panelMask.hidden = !isMask;
+          panelTable.hidden = !isTable;
+          panelUnmask.hidden = !isUnmask;
+
+          // Vid Avmaskera-vy minimerar vi listan i Gatekeeper för mer yta till AI-svaret
+          const details = gatekeeperBox.querySelector("details");
+          if (details && isUnmask) {
+            details.open = false;
+          }
+        }
+
+        themeBtn.addEventListener("click", function () {
+          const next = meta.getAttribute("content") === "dark" ? "light" : "dark";
+          meta.setAttribute("content", next);
+          syncThemeUI();
+        });
+
+        tabMask.addEventListener("click", function () { setView("mask"); });
+        tabTable.addEventListener("click", function () { setView("table"); });
+        tabUnmask.addEventListener("click", function () {
+          const active = tabUnmask.getAttribute("aria-pressed") === "true";
+          setView(active ? "mask" : "unmask");
+        });
+
+        const params = new URLSearchParams(window.location.search);
+        const initialView = params.get("view");
+        if (initialView === "unmask" || initialView === "table" || initialView === "mask") {
+          setView(initialView);
+        }
+        syncThemeUI();
+      })();
+    </script>
+  </body>
+</html>

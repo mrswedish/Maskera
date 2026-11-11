@@ -1673,6 +1673,14 @@ body {
   gap: 0.4rem;
 }
 
+.unmask-col .editor-textarea {
+  flex: 1;
+  min-height: 0;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+
 .unmask-header-row {
   display: flex;
   align-items: center;
