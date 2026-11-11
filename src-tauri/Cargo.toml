@@ -31,6 +31,11 @@ regex = "1"
 tauri-plugin-dialog = "2"
 reqwest = { version = "0.12", default-features = false, features = ["stream", "native-tls"] }
 futures-util = "0.3"
+# Portabel dokumentimport (Word .docx/.odt, Excel .xlsx/.xls/.ods, PDF .pdf) helt i Rust
+calamine = "0.28"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+quick-xml = "0.37"
+pdf-extract = "0.7"
 
 # ── Dev-profil: optimera dependencies med O3 även i debug-bygget ──────────────
 [profile.dev.package."*"]

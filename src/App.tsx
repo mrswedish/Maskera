@@ -30,6 +30,8 @@ import type {
   ParagraphFinding,
   ClassificationReport,
   SafetyVerdict,
+  ImportedDocument,
+  ReplacementPair,
 } from "./types";
 import {
   buildTranslationTable,
@@ -220,9 +222,14 @@ export default function App() {
   // Flikar
   const [activeTab, setActiveTab] = useState<"mask" | "table" | "unmask">("mask");
 
-  // Källtext
+  // Källtext & dokumentimport (Word .docx/.odt, Excel .xlsx/.xls/.ods, PDF .pdf, Text)
   const [sourceText, setSourceText] = useState("");
   const [fileName, setFileName] = useState("");
+  const [docSummary, setDocSummary] = useState<string>("");
+  const [originalDocxBytes, setOriginalDocxBytes] = useState<number[] | null>(
+    null
+  );
+  const [importingDoc, setImportingDoc] = useState(false);
   const [isEditing, setIsEditing] = useState(true);
 
   // Inställningar & filter
@@ -587,6 +594,8 @@ export default function App() {
       if (!text.trim()) return;
       setSourceText(normalizeInputText(text));
       setFileName("Urklipp (inklistrad)");
+      setDocSummary("Inklistrad text från urklipp");
+      setOriginalDocxBytes(null);
       setIsEditing(true);
       setHasAnalyzed(false);
       setReport(null);
@@ -597,6 +606,33 @@ export default function App() {
       alert("Kunde inte läsa från urklipp: " + String(e));
     }
   };
+
+  // Importera fil (Word .docx/.odt, Excel .xlsx/.xls/.ods, PDF .pdf, eller textfil) lokalt via Rust
+  const handleImportFile = useCallback(async (file: File) => {
+    setImportingDoc(true);
+    try {
+      const buf = await file.arrayBuffer();
+      const byteArr = Array.from(new Uint8Array(buf));
+      const imported = await invoke<ImportedDocument>("import_document_bytes", {
+        fileName: file.name,
+        bytes: byteArr,
+      });
+      setSourceText(normalizeInputText(imported.text));
+      setFileName(imported.file_name);
+      setDocSummary(imported.summary);
+      setOriginalDocxBytes(imported.can_export_docx ? byteArr : null);
+      setIsEditing(true);
+      setHasAnalyzed(false);
+      setReport(null);
+      setMatches([]);
+      setIgnoredKeys(new Set());
+      setLastDurationMs(null);
+    } catch (e) {
+      alert("Kunde inte läsa dokumentet: " + String(e));
+    } finally {
+      setImportingDoc(false);
+    }
+  }, []);
 
   // Analysera text (Steg 1: Regex + BERT NER, Steg 2: EmbeddingGemma 2)
   const handleAnalyze = async () => {
@@ -715,7 +751,7 @@ export default function App() {
     }, 2200);
   };
 
-  // Spara maskerad fil
+  // Spara maskerad fil (.txt)
   const handleSaveMaskedFile = async () => {
     const defaultName = fileName
       ? fileName.replace(/\.[^/.]+$/, "") + "_maskerad.txt"
@@ -726,6 +762,36 @@ export default function App() {
     });
     if (path) {
       await invoke("write_file", { path, content: maskedText });
+    }
+  };
+
+  // Spara maskerat Word-dokument (.docx) med bibehållen formatering
+  const handleSaveMaskedDocx = async () => {
+    if (!originalDocxBytes) return;
+    const defaultName = fileName
+      ? fileName.replace(/\.[^/.]+$/, "") + "_maskerad.docx"
+      : "maskerat_dokument.docx";
+    const path = await save({
+      defaultPath: defaultName,
+      filters: [{ name: "Word-dokument", extensions: ["docx"] }],
+    });
+    if (!path) return;
+
+    const replacements: ReplacementPair[] = [
+      ...activeTranslationTable.values(),
+    ].map((entry) => ({
+      original: entry.originalText,
+      replacement: `[${entry.maskedLabel.toUpperCase()}]`,
+    }));
+
+    try {
+      await invoke("export_masked_docx", {
+        path,
+        originalBytes: originalDocxBytes,
+        replacements,
+      });
+    } catch (e) {
+      alert("Kunde inte exportera maskerad .docx: " + String(e));
     }
   };
 
@@ -1080,28 +1146,26 @@ export default function App() {
             <Clipboard size={15} aria-hidden="true" />
             <span>Klistra in</span>
           </button>
-          <label className="tb-btn" title="Öppna .txt-fil från datorn">
-            <Upload size={15} aria-hidden="true" />
-            <span>Öppna fil</span>
+          <label
+            className="tb-btn"
+            title="Öppna Word (.docx/.odt), Excel (.xlsx/.xls/.ods), PDF (.pdf) eller textfil (.txt/.csv/.md)"
+          >
+            {importingDoc ? (
+              <RefreshCw size={15} className="spin" aria-hidden="true" />
+            ) : (
+              <Upload size={15} aria-hidden="true" />
+            )}
+            <span>{importingDoc ? "Läser dokument…" : "Öppna dokument"}</span>
             <input
               type="file"
-              accept=".txt,.log,.md,.csv"
+              accept=".txt,.log,.md,.csv,.tsv,.json,.xml,.docx,.odt,.xlsx,.xls,.xlsm,.xlsb,.ods,.pdf"
               style={{ display: "none" }}
               onChange={(e) => {
                 const f = e.target.files?.[0];
-                if (!f) return;
-                setFileName(f.name);
-                const r = new FileReader();
-                r.onload = (ev) => {
-                  setSourceText(normalizeInputText(ev.target?.result as string));
-                  setIsEditing(true);
-                  setHasAnalyzed(false);
-                  setReport(null);
-                  setMatches([]);
-                  setIgnoredKeys(new Set());
-                  setLastDurationMs(null);
-                };
-                r.readAsText(f);
+                if (f) {
+                  handleImportFile(f);
+                  e.target.value = "";
+                }
               }}
             />
           </label>
@@ -1548,24 +1612,13 @@ export default function App() {
                   setIsDragOver(false);
                   const f = e.dataTransfer.files?.[0];
                   if (f) {
-                    setFileName(f.name);
-                    const r = new FileReader();
-                    r.onload = (ev) => {
-                      setSourceText(normalizeInputText(ev.target?.result as string));
-                      setIsEditing(true);
-                      setHasAnalyzed(false);
-                      setReport(null);
-                      setMatches([]);
-                      setIgnoredKeys(new Set());
-                      setLastDurationMs(null);
-                    };
-                    r.readAsText(f);
+                    handleImportFile(f);
                   }
                 }}
               >
                 <textarea
                   className="editor-textarea"
-                  placeholder="Klistra in text här (Ctrl+V), skriv direkt, eller dra och släpp en textfil..."
+                  placeholder="Klistra in text här (Ctrl+V), skriv direkt, eller dra och släpp Word (.docx), Excel (.xlsx), PDF (.pdf) eller textfil..."
                   value={sourceText}
                   onChange={(e) => {
                     setSourceText(e.target.value);
@@ -1580,7 +1633,7 @@ export default function App() {
                   <div className="editor-empty-hint">
                     <Clipboard size={32} />
                     <p>
-                      Klistra in text (Ctrl+V) eller dra och släpp en .txt-fil här
+                      Klistra in text (Ctrl+V) eller dra och släpp Word (.docx), Excel (.xlsx), PDF (.pdf) eller .txt här
                     </p>
                   </div>
                 )}
@@ -1627,25 +1680,51 @@ export default function App() {
               <span className="footer-stats">
                 {sourceText.length > 0 && (
                   <>
-                    {sourceText.length} tecken · {sourceText.split(/\s+/).filter(Boolean).length} ord
+                    {fileName && (
+                      <>
+                        <strong>{fileName}</strong>
+                        {docSummary ? ` (${docSummary})` : ""} ·{" "}
+                      </>
+                    )}
+                    {sourceText.length} tecken ·{" "}
+                    {sourceText.split(/\s+/).filter(Boolean).length} ord
                     {activeMatches.length > 0 && (
-                      <> · <strong>{activeMatches.length}</strong> maskerade uppgifter</>
+                      <>
+                        {" "}
+                        · <strong>{activeMatches.length}</strong> maskerade
+                        uppgifter
+                      </>
                     )}
                     {ignoredKeys.size > 0 && (
-                      <> · <em>{ignoredKeys.size}</em> undantagna</>
+                      <>
+                        {" "}
+                        · <em>{ignoredKeys.size}</em> undantagna
+                      </>
                     )}
                   </>
                 )}
               </span>
 
               <div className="footer-actions">
+                {originalDocxBytes && (
+                  <button
+                    type="button"
+                    className="tb-btn"
+                    onClick={handleSaveMaskedDocx}
+                    disabled={!sourceText}
+                    title="Spara en maskerad kopia av Word-dokumentet (.docx) med bibehållen formatering"
+                  >
+                    <Download size={14} aria-hidden="true" />
+                    <span>Spara maskerad .docx</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   className="tb-btn"
                   onClick={handleSaveMaskedFile}
                   disabled={!sourceText}
                 >
-                  <Download size={14} />
+                  <Download size={14} aria-hidden="true" />
                   <span>Spara maskerad .txt</span>
                 </button>
               </div>

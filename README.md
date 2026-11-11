@@ -6,7 +6,7 @@ Maskera är ett snabbt, helt lokalt skrivbordsverktyg för automatisk identifier
 
 ## Vad gör det?
 
-Klistra in text direkt från urklipp (`Ctrl+V` eller knappen **Klistra in**), skriv i editorn eller öppna en textfil, välj snabbprofil och låt Maskera arbeta i tre lager:
+Klistra in text direkt från urklipp (`Ctrl+V` eller knappen **Klistra in**), skriv i editorn eller öppna/dra-och-släpp **Word (`.docx`, `.odt`), Excel (`.xlsx`, `.xls`, `.ods`), PDF (`.pdf`) eller textfiler (`.txt`, `.csv`, `.md`)**, välj snabbprofil och låt Maskera arbeta i tre lager:
 
 1. **Lager 1 — Struktur & Hemligheter (< 1 ms):** Förkompilerade reguljära uttryck med Luhn- och datumvalidering identifierar personnummer, samordningsnummer, organisationsnummer, e-post, telefonnummer, IBAN/Bankgiro/Plusgiro, betalkort, 16–22-siffriga tjänstekort/SITHS-kort, HSA-ID, interna intranätlänkar (`https://intranat...`) samt API-nycklar/JWT/privata nycklar.
 2. **Lager 2 — Namngivna entiteter (Svensk BERT NER via `ort`):** Identifierar personnamn, organisationer, platser, tider och händelser i kontext (~33× snabbare exekvering via statiskt länkad Microsoft ONNX Runtime med flertrådad SIMD och längdsorterad mini-batchning).
@@ -20,7 +20,7 @@ Klistra in text direkt från urklipp (`Ctrl+V` eller knappen **Klistra in**), sk
 4. **Granska, kopiera & avmaskera AI-svar:**
    - Klicka (eller tryck `Retur`/`Mellanslag`) på ett markerat ord i granskningsvyn för att undanta/avmaskera det — trafikljusbedömningen uppdateras direkt (< 1 ms).
    - Klicka på ett flaggat avsnitt i Gatekeeper-bannern (`Visa i text →`) för att hoppa direkt till det inramade stycket i texten.
-   - Kopiera den maskerade texten med 1 klick (**Kopiera maskerad**) och klistra in svaret från ChatGPT/Claude/Copilot/Gemini under fliken **Avmaskera AI-svar** för att lokalt återställa `[PERSON A]`, `[ORGANISATION A]` osv. till originalvärdena.
+   - Kopiera den maskerade texten med 1 klick (**Kopiera maskerad**), spara som `.txt` eller **exportera ett maskerat Word-dokument (`*_maskerad.docx`) med bibehållen formatering**, och klistra in svaret från ChatGPT/Claude/Copilot/Gemini under fliken **Avmaskera AI-svar** för att lokalt återställa `[PERSON A]`, `[ORGANISATION A]` osv. till originalvärdena.
 
 ---
 

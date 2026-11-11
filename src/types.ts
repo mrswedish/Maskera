@@ -47,3 +47,16 @@ export interface ClassificationReport {
   scan_duration_ms: number;
   findings: ParagraphFinding[];
 }
+
+export interface ImportedDocument {
+  file_name: string;
+  format: "docx" | "xlsx" | "pdf" | "odt" | "text" | string;
+  text: string;
+  summary: string;
+  can_export_docx: boolean;
+}
+
+export interface ReplacementPair {
+  original: string;
+  replacement: string;
+}

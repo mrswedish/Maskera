@@ -1,4 +1,5 @@
 mod classifier;
+mod documents;
 mod ner;
 
 use std::path::{Path, PathBuf};
@@ -852,6 +853,32 @@ fn write_file(path: String, content: String) -> Result<(), String> {
     std::fs::write(&path, content.as_bytes()).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn import_document_bytes(
+    file_name: String,
+    bytes: Vec<u8>,
+) -> Result<documents::ImportedDocument, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        documents::import_document_bytes(&file_name, &bytes)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking-fel (import): {e}"))?
+}
+
+#[tauri::command]
+async fn export_masked_docx(
+    path: String,
+    original_bytes: Vec<u8>,
+    replacements: Vec<documents::ReplacementPair>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let masked_bytes = documents::export_masked_docx_bytes(&original_bytes, &replacements)?;
+        std::fs::write(&path, &masked_bytes).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking-fel (export_docx): {e}"))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -868,7 +895,9 @@ pub fn run() {
             load_gemma,
             classify_document,
             analyze_text,
-            write_file
+            write_file,
+            import_document_bytes,
+            export_masked_docx
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
