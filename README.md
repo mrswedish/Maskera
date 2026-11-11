@@ -1,108 +1,74 @@
 # Maskera
 
-Maskera är ett lokalt verktyg för automatisk identifiering och maskering av personuppgifter (PII), hemligheter och känslig kontext i svenska texter samt återställning av AI-svar. Allt körs 100 % lokalt på din dator — ingen data skickas någonsin till molnet.
+Maskera är ett snabbt, helt lokalt skrivbordsverktyg för automatisk identifiering och maskering av personuppgifter (PII), tekniska hemligheter och känslig kontext i svenska texter — samt lokal återställning (avmaskering) av AI-svar. Allt körs **100 % lokalt** på din dator utan molnanrop.
 
 ---
 
 ## Vad gör det?
 
-Klistra in text från urklipp (`Ctrl+V`), skriv direkt eller öppna en `.txt`-fil, välj snabbprofil och låt verktyget:
+Klistra in text direkt från urklipp (`Ctrl+V` eller knappen **Klistra in**), skriv i editorn eller öppna en textfil, välj snabbprofil och låt Maskera arbeta i tre lager:
 
-1. **Identifiera personuppgifter och hemligheter** via förkompilerade reguljära uttryck och AI (svensk BERT NER).
-2. **Bedöma AI-delningsrisk (Lager 3)** med semantisk klassificering via EmbeddingGemma 2 och hemlighetsdetektering — ger trafikljusindikering för om texten är säker att klistra in i en extern AI-tjänst före och efter maskering.
-3. **Granska och justera** — undanta/avmaskera specifika ord med ett enkelt klick eller lägg till egna termer manuellt.
-4. **Exportera eller kopiera** maskerad text med 1-klick samt spara översättningstabell (JSON/TXT).
-5. **Avmaskera AI-svar (Tab 3)** — klistra in svaret från ChatGPT/Claude/Gemini så återställs alla platshållare (`[PERSON A]`, `[ORGANISATION A]`) lokalt till originalvärdena.
+1. **Lager 1 — Struktur & Hemligheter (< 1 ms):** Förkompilerade reguljära uttryck med Luhn- och datumvalidering identifierar personnummer, samordningsnummer, organisationsnummer, e-post, telefonnummer, IBAN/Bankgiro/Plusgiro, betalkort, 16–22-siffriga tjänstekort/SITHS-kort, HSA-ID, interna intranätlänkar (`https://intranat...`) samt API-nycklar/JWT/privata nycklar.
+2. **Lager 2 — Namngivna entiteter (Svensk BERT NER via `ort`):** Identifierar personnamn, organisationer, platser, tider och händelser i kontext (~33× snabbare exekvering via statiskt länkad Microsoft ONNX Runtime med flertrådad SIMD och längdsorterad mini-batchning).
+3. **Lager 3 — Semantisk AI-gatekeeper (`EmbeddingGemma 2`):** Analyserar dokumentets avsnitt semantiskt (768-dimensionella inbäddningar) och flaggar samt **markerar känsliga stycken direkt i textvyn** om texten innehåller:
+   - **Hälsa & Vård (GDPR Art. 9)** — diagnoser, sjukskrivning, behandling, symtom, vårdjournaler.
+   - **Känslig personuppgift / Lagöverträdelse (GDPR Art. 9–10)** — brottsmisstanke, dom, socialtjänst, LVU/LVM, facklig/politisk/religiös tillhörighet.
+   - **Tjänstekort, eID, Behörighet & Intranät** — SITHS-kort, e-legitimation, certifikat, reserv-/konsultkort, korthandläggare och interna intranätrutiner.
+   - **Affärskritiskt & Företagshemligheter** — opublicerade siffror, M&A-bud, marginaler, kundofferter, avtalsvillkor.
+   - **Säkerhet, IT-arkitektur & Intern kod** — sårbarheter, penetrationstester, brandväggsregler, intern infrastruktur.
+   - **HR & Personalärende** — lönesättning, medarbetarsamtal, arbetsrättsliga ärenden.
+4. **Granska, kopiera & avmaskera AI-svar:**
+   - Klicka (eller tryck `Retur`/`Mellanslag`) på ett markerat ord i granskningsvyn för att undanta/avmaskera det — trafikljusbedömningen uppdateras direkt (< 1 ms).
+   - Klicka på ett flaggat avsnitt i Gatekeeper-bannern (`Visa i text →`) för att hoppa direkt till det inramade stycket i texten.
+   - Kopiera den maskerade texten med 1 klick (**Kopiera maskerad**) och klistra in svaret från ChatGPT/Claude/Copilot/Gemini under fliken **Avmaskera AI-svar** för att lokalt återställa `[PERSON A]`, `[ORGANISATION A]` osv. till originalvärdena.
+
+---
 
 ### Vad detekteras?
 
-| Kategori | Metod | Exempel |
+| Kategori | Lager / Metod | Exempel |
 |---|---|---|
-| Hemlighet/Nyckel | Regex | API-nycklar (`sk-...`, `AIza...`, `ghp_...`, `AKIA...`, `xox...`), JWT tokens, PEM privata nycklar, databasanslutningar |
-| Personnummer | Regex | `850515-1234`, `701063-2391` (samordningsnummer) |
-| E-postadress | Regex | `namn@example.se` |
-| Telefonnummer | Regex | `+46 8 123 45 67`, `08-123-45-67` |
-| Organisationsnummer | Regex | `556614-5180` (skiljs automatiskt från personnummer) |
-| Konto/Giro | Regex | IBAN `SE9550000000054910000003`, Bankgiro `5402-1234`, Plusgiro `12345-6` |
-| IP-adress | Regex | `8.8.8.8` (publika; privata nät 10.x, 192.168.x m.fl. filtreras bort) |
-| Kortnummer | Regex + Luhn | `4532-1234-5678-9123` (Visa/Mastercard/Amex, valideras med Luhn) |
-| Person | AI (BERT) | `Anders Andersson` |
-| Organisation | AI (BERT) | `Försäkringskassan` |
-| Plats | AI (BERT) | `Stockholm` |
-| Övrigt | AI (BERT) | Diverse namngivna entiteter |
-| Tid | AI (BERT) | `idag`, `fem år` |
-| Händelse | AI (BERT) | `coronapandemin` |
-| Känslig kontext | AI (EmbeddingGemma 2) | GDPR Art. 9/10 (hälsa, vård, lagöverträdelser), företagshemligheter/M&A, IT-säkerhet |
-
-Alla kategorier kan slås av/på individuellt i vänsterpanelen.
+| Hemlighet/Nyckel | Lager 1 (Regex) | API-nycklar (`sk-...`, `AIza...`, `ghp_...`, `AKIA...`), JWT, PEM-nycklar, HSA-ID (`SE...`), intranät-URL:er (`https://intranat...`) |
+| Personnummer | Lager 1 (Regex + datum) | `850515-1234`, `19850515-1234`, `701063-2391` (samordningsnummer) |
+| Organisationsnummer | Lager 1 (Regex) | `556614-5180` (skiljs automatiskt från personnummer via månadsfält >= 20) |
+| Kortnummer | Lager 1 (Regex + Luhn / SITHS) | Betalkort (`4532-...` med Luhn) samt 16–22-siffriga tjänste-/SITHS-kort (`9752267235710527661`) |
+| E-postadress | Lager 1 (Regex) | `namn@example.se` |
+| Telefonnummer | Lager 1 (Regex) | `+46 8 123 45 67`, `08-123 45 67` |
+| Konto/Giro | Lager 1 (Regex) | IBAN `SE9550000000054910000003`, Bankgiro `5402-1234`, Plusgiro `12345-6` |
+| IP-adress | Lager 1 (Regex) | Publika IPv4-adresser (privata nät `10.x`, `192.168.x`, `127.x` filtreras bort) |
+| Person | Lager 2 (BERT NER) | `Anders Andersson` |
+| Organisation | Lager 2 (BERT NER) | `Försäkringskassan`, `Region Jönköpings län` |
+| Plats | Lager 2 (BERT NER) | `Stockholm`, `Jönköping` |
+| Övrigt | Lager 2 (BERT NER) | Diverse namngivna entiteter |
+| Tid | Lager 2 (BERT NER) | `idag`, `2027-01-04` |
+| Händelse | Lager 2 (BERT NER) | Namngivna händelser |
+| Känsliga stycken | Lager 3 (`EmbeddingGemma 2`) | Vård/hälsa, lagöverträdelser, SITHS/eID/intranät, företagshemligheter, IT-säkerhet, HR |
 
 ---
 
-## Hur fungerar det?
+## Tillgänglighet (WCAG 2.2 AA) & Tema
 
-```
-Tauri-app (Rust-shell + WebView)
-  └── React-gränssnitt (TypeScript)
-        └── Tauri-kommandon (invoke)
-              ├── Regex-pass (förkompilerad Rust-motor, < 1 ms)
-              └── BERT NER — Microsoft ONNX Runtime (`ort`, statiskt länkad i Rust)
-                    ├── Modell laddas ner från HuggingFace vid första start
-                    ├── Cachas i app-datakatalogen (aldrig bundlad i appen)
-                    └── Flertrådad SIMD + mini-batchning helt lokalt — ingen server behövs
-```
-
-### Analysflödet
-
-1. **Regex-pass** — förkompilerade mönster med svensk datum-/kontrollsiffrevalidering (skiljer t.ex. automatiskt personnummer/samordningsnummer från organisationsnummer). Om endast Regex-kategorier är valda körs analysen på under 1 ms utan att vänta på AI-modellen.
-2. **Smart chunking & BERT NER** — texten delas vid naturliga stycke- och meningsgränser (~1 600 tecken, noll onödigt överlapp vid ren brytpunkt) och analyseras parallellt i längdsorterade mini-batchar via Microsoft ONNX Runtime (`ort`).
-3. **Ord-aggregering** — tokenizerns `word_ids` används för att gruppera subword-tokens till hela ord, undviker att delar av sammansatta ord felidentifieras som entiteter
-4. **Konfidenströskel** — tokens med för svag modellsäkerhet filtreras bort (justerbar i inställningar)
-5. **Deduplicering & prioritering** — exakta Regex-träffar prioriteras framför överlappande NER-träffar
-6. **Granskning** — användaren kan klicka för att ignorera träffar, eller lägga till egna
-7. **Maskering** — aktiva träffar ersätts med etiketter som `[PERSON A]`, `[PERSONNUMMER 1]`
-
-### Inställningar
-
-Klicka på kugghjulet (⚙) i övre högra hörnet för att justera **konfidenströskel** (30–95 %). Lägre värde ger fler träffar men fler falska positiv; högre värde ger färre men säkrare träffar. Standardvärde: 60 %.
-
-### Översättningstabellen
-
-Varje unik text mappas till ett konsekvent maskerat label:
-- AI-entiteter → bokstavssuffix: `Person A`, `Person B` …
-- Regex/manuella → numeriskt suffix: `Personnummer 1`, `E-post 2` …
-
-Tabellen kan exporteras som JSON eller tab-separerad TXT.
-
-### Modell
-
-AI-modellen ([KBLab/bert-base-swedish-cased-ner](https://huggingface.co/KBLab/bert-base-swedish-cased-ner)) är kvantiserad till ONNX int8-format och publicerad på HuggingFace: [psvensk/bert-base-swedish-cased-ner-onnx](https://huggingface.co/psvensk/bert-base-swedish-cased-ner-onnx).
-
-Modellfilerna (~120 MB totalt) laddas ner automatiskt vid första start via Rust async streaming och cachas i appens datakatalog. Nedladdningen visas med en progress-bar i gränssnittet. Vid eventuella nätverksproblem finns ett manuellt alternativ — se nedan.
-
-### Nätverksbegränsade miljöer (företagsproxy)
-
-Om automatisk nedladdning misslyckas (t.ex. brandvägg eller intern proxy) kan modellfilerna laddas ner manuellt:
-
-1. Ladda ner alla filer från [HuggingFace](https://huggingface.co/psvensk/bert-base-swedish-cased-ner-onnx) och spara dem i en lokal mapp
-2. Klicka på **Välj modellmapp manuellt** i appen och peka på den mappen
-
-Filer som krävs: `model_quantized.onnx`, `tokenizer.json`, `tokenizer_config.json`, `special_tokens_map.json`, `config.json`
+- **Ljust och mörkt tema:** Följer operativsystemets färgschema (`color-scheme: light dark` och CSS `light-dark()`) som standard, med möjlighet att växla direkt i sidhuvudet (**Ljust tema** / **Mörkt tema**) eller välja **System / Ljust / Mörkt** i konfigurationspanelen utan vit blinkning (FOUC) vid uppstart.
+- **Kontraster (WCAG 1.4.3 & 1.4.11):** Alla textfärger och kategorietiketter är kalibrerade för minst `4.5:1` kontrast mot sin bakgrund, och interaktiva ramar/fokusringar håller minst `3:1` kontrast (samt stöd för `@media (prefers-contrast: more)` och Windows High Contrast `@media (forced-colors: active)`).
+- **Full tangentbordsnavigering:** Stöd för piltangentsnavigering i verktygsrad och flikar (`focusgroup`), tydliga `:focus-visible`-ramar samt tangentbordsstyrning (`Retur`/`Mellanslag`) på alla ordmarkeringar och styckehopp.
 
 ---
 
-## Teknik
+## Hur fungerar arkitekturen?
 
-| Lager | Teknologi |
-|---|---|
-| AI-modell | [KBLab/bert-base-swedish-cased-ner](https://huggingface.co/KBLab/bert-base-swedish-cased-ner) — svensk BERT tränad på NER |
-| ML-inferens | [ort (Microsoft ONNX Runtime)](https://ort.pyke.io) — statiskt länkad native SIMD + batchad inferens |
-| Tokenisering | [HuggingFace tokenizers](https://github.com/huggingface/tokenizers) (Rust) |
-| HTTP-nedladdning | [reqwest](https://github.com/seanmonstar/reqwest) — async streaming med native-TLS (respekterar OS-certifikat och systemproxy) |
-| Gränssnitt | React 19 + TypeScript |
-| Desktop-shell | [Tauri 2](https://tauri.app) (Rust) — ~5 MB binär |
-| CI/CD | GitHub Actions — automatiskt Windows-bygge vid push till `main` |
+```
+Tauri 2-app (Rust-shell + WebView)
+  └── React 19-gränssnitt (TypeScript, WCAG AA, Ljust/Mörkt tema)
+        └── Tauri-kommandon (invoke + live-events)
+              ├── Lager 1: Förkompilerad Rust Regex-motor (< 1 ms)
+              ├── Lager 2: KBLab/bert-base-swedish-cased-ner via Microsoft ONNX Runtime (`ort`)
+              └── Lager 3: EmbeddingGemma 2 (768d q4 ONNX) semantisk styckeklassificerare
+```
 
-**Ingen Python krävs** — varken för att köra eller bygga appen.
+### Modeller & lokal lagring
+
+- **Lager 2 (BERT NER, ~120 MB):** [`psvensk/bert-base-swedish-cased-ner-onnx`](https://huggingface.co/psvensk/bert-base-swedish-cased-ner-onnx) laddas ner automatiskt vid första start.
+- **Lager 3 (EmbeddingGemma 2, ~197 MB):** [`onnx-community/embeddinggemma-300m-ONNX`](https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX) (`model_q4.onnx`) hämtas med ett klick inifrån appen och cachas i användarens lokala appdata-mapp.
 
 ---
 
@@ -113,21 +79,17 @@ npm install
 npm run tauri dev
 ```
 
-Tauri-fönstret öppnas. Första gången laddas ONNX-modellen ner från HuggingFace (~120 MB) — detta sker med progress-bar i appen.
-
 ## Bygga fristående app
 
 ```bash
-# Mac
-npm run tauri build
-# → src-tauri/target/release/bundle/macos/maskera.app
-# → src-tauri/target/release/bundle/dmg/maskera_x.x.x_aarch64.dmg
+# Kontrollera frontend + Rust-tester
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml
 
-# Windows (via GitHub Actions vid push till main)
+# Bygg release-paket
+npm run tauri build
 ```
 
----
-
-## Releases
-
-Färdigbyggda Windows-versioner finns under [Releases](../../releases). Ladda ner installationsfilen och kör — modellen laddas ner automatiskt vid första start.
+Vid push till `main` bygger GitHub Actions automatiskt både:
+1. **`Maskera-portabel.exe`** — en fristående fil som kan köras direkt utan installation eller administratörsrättigheter.
+2. **`Maskera-installation`** — vanlig Windows NSIS-installerare (`*-setup.exe`).

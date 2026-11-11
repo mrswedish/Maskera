@@ -17,6 +17,9 @@ import {
   Plus,
   RefreshCw,
   Check,
+  Sun,
+  Moon,
+  Monitor,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -93,23 +96,26 @@ const PRESETS = {
 
 type PresetKey = keyof typeof PRESETS;
 
+// WCAG AA-kalibrerade kategorifärger (>= 5.0:1 kontrast mot vit text #ffffff)
 const COLORS: Record<string, string> = {
-  Personnummer: "#ef4444",
-  "E-post": "#3b82f6",
-  Telefonnummer: "#f59e0b",
-  "Org.nummer": "#a855f7",
-  "Konto/Giro": "#f472b6",
-  "IP-adress": "#0ea5e9",
-  Kortnummer: "#dc2626",
-  "Hemlighet/Nyckel": "#e11d48",
-  Person: "#8b5cf6",
-  Organisation: "#10b981",
-  Plats: "#ec4899",
-  Övrigt: "#94a3b8",
-  Tid: "#06b6d4",
-  Händelse: "#eab308",
-  Manuell: "#f97316",
+  Personnummer: "#b91c1c",
+  "E-post": "#1d4ed8",
+  Telefonnummer: "#b45309",
+  "Org.nummer": "#7e22ce",
+  "Konto/Giro": "#be185d",
+  "IP-adress": "#0369a1",
+  Kortnummer: "#991b1b",
+  "Hemlighet/Nyckel": "#9f1239",
+  Person: "#5b21b6",
+  Organisation: "#047857",
+  Plats: "#9d174d",
+  Övrigt: "#475569",
+  Tid: "#0e7490",
+  Händelse: "#854d0e",
+  Manuell: "#c2410c",
 };
+
+type ColorSchemeSetting = "light dark" | "light" | "dark";
 
 function matchKey(m: Match): string {
   return `${m.start}-${m.end}`;
@@ -281,6 +287,79 @@ export default function App() {
 
   // Dra-och-släpp
   const [isDragOver, setIsDragOver] = useState(false);
+
+  // Tema / Färgschema (Modern Web Guidance: dark-mode & dark-mode-toggle)
+  const [colorScheme, setColorScheme] = useState<ColorSchemeSetting>(() => {
+    try {
+      const saved = localStorage.getItem("color-scheme");
+      if (saved === "light" || saved === "dark") return saved;
+    } catch {}
+    return "light dark";
+  });
+  const [systemPrefersDark, setSystemPrefersDark] = useState<boolean>(() =>
+    typeof window !== "undefined" && window.matchMedia
+      ? window.matchMedia("(prefers-color-scheme: dark)").matches
+      : false
+  );
+
+  const renderedDark =
+    colorScheme === "dark" ||
+    (colorScheme === "light dark" && systemPrefersDark);
+
+  const applyColorScheme = useCallback((nextScheme: ColorSchemeSetting) => {
+    setColorScheme(nextScheme);
+    const meta = document.querySelector<HTMLMetaElement>(
+      'meta[name="color-scheme"]'
+    );
+    if (meta) {
+      meta.content = nextScheme;
+    }
+    try {
+      if (nextScheme === "light dark") {
+        localStorage.removeItem("color-scheme");
+      } else {
+        localStorage.setItem("color-scheme", nextScheme);
+      }
+    } catch {}
+  }, []);
+
+  // Tvåläges-snabbknapp i headern enligt MWG dark-mode-toggle-algoritmen
+  const handleQuickToggleTheme = useCallback(() => {
+    const target: "light" | "dark" = renderedDark ? "light" : "dark";
+    const systemScheme: "light" | "dark" = systemPrefersDark ? "dark" : "light";
+    if (target === systemScheme) {
+      applyColorScheme("light dark");
+    } else {
+      applyColorScheme(target);
+    }
+  }, [renderedDark, systemPrefersDark, applyColorScheme]);
+
+  // Lyssna på OS-ändringar (prefers-color-scheme) och storage-ändringar mellan flikar
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onMqChange = (e: MediaQueryListEvent) => {
+      setSystemPrefersDark(e.matches);
+    };
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === "color-scheme") {
+        const next: ColorSchemeSetting =
+          e.newValue === "light" || e.newValue === "dark"
+            ? e.newValue
+            : "light dark";
+        setColorScheme(next);
+        const meta = document.querySelector<HTMLMetaElement>(
+          'meta[name="color-scheme"]'
+        );
+        if (meta) meta.content = next;
+      }
+    };
+    mq.addEventListener("change", onMqChange);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      mq.removeEventListener("change", onMqChange);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
 
   // Polyfill focusgroup if not natively supported
   useEffect(() => {
@@ -726,20 +805,37 @@ export default function App() {
         nodes.push(
           <mark
             key={`${keyPrefix}-m-${idx}`}
+            role="button"
+            tabIndex={0}
+            aria-pressed={!ignored}
             className={`highlight-chip${ignored ? " ignored" : ""}`}
             style={{
               backgroundColor: ignored
                 ? "transparent"
-                : COLORS[m.label] || "#94a3b8",
+                : COLORS[m.label] || "#475569",
             }}
             onClick={(e) => {
               e.stopPropagation();
               toggleIgnored(key);
             }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                toggleIgnored(key);
+              } else if (e.key === " ") {
+                e.preventDefault();
+              }
+            }}
+            onKeyUp={(e) => {
+              if (e.key === " ") {
+                e.preventDefault();
+                toggleIgnored(key);
+              }
+            }}
             title={
               ignored
-                ? "Klicka för att maskera igen"
-                : "Klicka för att undanta/avmaskera"
+                ? "Klicka eller tryck Retur för att maskera igen"
+                : "Klicka eller tryck Retur för att undanta/avmaskera"
             }
           >
             {sourceText.slice(mStart, mEnd)}
@@ -941,6 +1037,29 @@ export default function App() {
                 : "Valfri"}
             </span>
           </span>
+
+          <button
+            type="button"
+            className="theme-toggle-btn"
+            onClick={handleQuickToggleTheme}
+            title={
+              renderedDark
+                ? "Byt till ljust tema"
+                : "Byt till mörkt tema"
+            }
+          >
+            {renderedDark ? (
+              <>
+                <Sun size={14} aria-hidden="true" />
+                <span>Ljust tema</span>
+              </>
+            ) : (
+              <>
+                <Moon size={14} aria-hidden="true" />
+                <span>Mörkt tema</span>
+              </>
+            )}
+          </button>
         </div>
       </header>
 
@@ -1092,15 +1211,17 @@ export default function App() {
                   <button
                     key={cat}
                     type="button"
-                    className={`filter-chip ${isSelected ? "selected" : ""}`}
+                    className="filter-chip"
+                    aria-pressed={isSelected}
                     onClick={() => toggleCategory(cat)}
                     style={{
-                      borderColor: isSelected ? COLORS[cat] || "#818cf8" : undefined,
+                      borderColor: isSelected ? COLORS[cat] || "#4338ca" : undefined,
                     }}
                   >
                     <span
                       className="filter-dot"
-                      style={{ backgroundColor: COLORS[cat] || "#94a3b8" }}
+                      style={{ backgroundColor: COLORS[cat] || "#475569" }}
+                      aria-hidden="true"
                     />
                     <span>{cat}</span>
                     {count > 0 && <span className="chip-count">{count}</span>}
@@ -1110,9 +1231,10 @@ export default function App() {
             </div>
 
             <div className="filter-extra-row">
-              <label className="threshold-control">
+              <label className="threshold-control" htmlFor="bert-threshold-range">
                 <span>BERT Känslighet:</span>
                 <input
+                  id="bert-threshold-range"
                   type="range"
                   min={0.3}
                   max={0.95}
@@ -1123,16 +1245,62 @@ export default function App() {
                 <span className="threshold-val">{Math.round(threshold * 100)}%</span>
               </label>
 
+              {/* Treläges temaväljare i inställningspanelen (MWG: dark-mode-toggle) */}
+              <div
+                role="group"
+                aria-label="Färgtema"
+                className="theme-choice-group"
+              >
+                <span className="filter-section-title">Tema:</span>
+                <button
+                  type="button"
+                  className="tb-preset-btn"
+                  aria-pressed={colorScheme === "light dark"}
+                  onClick={() => applyColorScheme("light dark")}
+                >
+                  <Monitor size={13} aria-hidden="true" />
+                  <span>
+                    System ({systemPrefersDark ? "Mörkt" : "Ljust"})
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="tb-preset-btn"
+                  aria-pressed={colorScheme === "light"}
+                  onClick={() => applyColorScheme("light")}
+                >
+                  <Sun size={13} aria-hidden="true" />
+                  <span>Ljust</span>
+                </button>
+                <button
+                  type="button"
+                  className="tb-preset-btn"
+                  aria-pressed={colorScheme === "dark"}
+                  onClick={() => applyColorScheme("dark")}
+                >
+                  <Moon size={13} aria-hidden="true" />
+                  <span>Mörkt</span>
+                </button>
+              </div>
+
               {/* Manuell markering */}
               <div className="manual-add-inline">
+                <label htmlFor="manual-word-input" className="visually-hidden">
+                  Ord eller namn att maskera manuellt
+                </label>
                 <input
+                  id="manual-word-input"
                   type="text"
                   placeholder="Lägg till ord/namn manuellt…"
                   value={manualWord}
                   onChange={(e) => setManualWord(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleAddManual()}
                 />
+                <label htmlFor="manual-label-select" className="visually-hidden">
+                  Kategori för manuell maskering
+                </label>
                 <select
+                  id="manual-label-select"
                   value={manualLabel}
                   onChange={(e) => setManualLabel(e.target.value)}
                 >
@@ -1148,7 +1316,7 @@ export default function App() {
                   onClick={handleAddManual}
                   disabled={!manualWord.trim()}
                 >
-                  <Plus size={14} />
+                  <Plus size={14} aria-hidden="true" />
                   <span>Lägg till</span>
                 </button>
               </div>
@@ -1247,22 +1415,23 @@ export default function App() {
                       st med känslig kontext):
                     </span>
                   </div>
-                  <ul className="findings-list">
+                  <ul className="findings-list" role="list">
                     {report.findings.map((f, i) => (
-                      <li
-                        key={i}
-                        className={`finding-item ${f.severity} clickable`}
-                        onClick={() => handleJumpToParagraph(f.paragraph_index)}
-                        title="Klicka för att hoppa till det markerade stycket i texten"
-                      >
-                        <span className="finding-category">
-                          Avsnitt {f.paragraph_index} · {f.category}
-                        </span>
-                        <span className="finding-confidence">
-                          {Math.round(f.confidence * 100)}% träffsäkerhet
-                        </span>
-                        <span className="finding-preview">”{f.preview}”</span>
-                        <span className="finding-jump-link">Visa i text →</span>
+                      <li key={i} className={`finding-item ${f.severity}`}>
+                        <button
+                          type="button"
+                          className="finding-item-btn"
+                          onClick={() => handleJumpToParagraph(f.paragraph_index)}
+                        >
+                          <span className="finding-category">
+                            Avsnitt {f.paragraph_index} · {f.category}
+                          </span>
+                          <span className="finding-confidence">
+                            {Math.round(f.confidence * 100)}% träffsäkerhet
+                          </span>
+                          <span className="finding-preview">”{f.preview}”</span>
+                          <span className="finding-jump-link">Visa i text →</span>
+                        </button>
                       </li>
                     ))}
                   </ul>
@@ -1503,12 +1672,15 @@ export default function App() {
               <>
                 <div className="table-wrapper">
                   <table className="custom-table">
+                    <caption className="visually-hidden">
+                      Översättningstabell mellan maskerade platshållare och originalvärden
+                    </caption>
                     <thead>
                       <tr>
-                        <th>Typ</th>
-                        <th>Platshållare (Maskerad)</th>
-                        <th>Originalvärde i text</th>
-                        <th>Förekomster</th>
+                        <th scope="col">Typ</th>
+                        <th scope="col">Platshållare (Maskerad)</th>
+                        <th scope="col">Originalvärde i text</th>
+                        <th scope="col">Förekomster</th>
                       </tr>
                     </thead>
                     <tbody>
