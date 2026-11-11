@@ -879,6 +879,20 @@ async fn export_masked_docx(
     .map_err(|e| format!("spawn_blocking-fel (export_docx): {e}"))?
 }
 
+#[tauri::command]
+async fn export_masked_xlsx(
+    path: String,
+    original_bytes: Vec<u8>,
+    replacements: Vec<documents::ReplacementPair>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let masked_bytes = documents::export_masked_xlsx_bytes(&original_bytes, &replacements)?;
+        std::fs::write(&path, &masked_bytes).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking-fel (export_xlsx): {e}"))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -897,7 +911,8 @@ pub fn run() {
             analyze_text,
             write_file,
             import_document_bytes,
-            export_masked_docx
+            export_masked_docx,
+            export_masked_xlsx
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

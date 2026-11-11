@@ -54,6 +54,7 @@ export interface ImportedDocument {
   text: string;
   summary: string;
   can_export_docx: boolean;
+  can_export_xlsx: boolean;
 }
 
 export interface ReplacementPair {

@@ -15,6 +15,7 @@ pub struct ImportedDocument {
     pub text: String,
     pub summary: String,
     pub can_export_docx: bool,
+    pub can_export_xlsx: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +40,7 @@ pub fn import_document_bytes(file_name: &str, bytes: &[u8]) -> Result<ImportedDo
                 text,
                 summary: format!("Word-dokument (.docx) · {paras} stycken/rader inlästa lokalt"),
                 can_export_docx: true,
+                can_export_xlsx: false,
             })
         }
         "odt" => {
@@ -49,10 +51,12 @@ pub fn import_document_bytes(file_name: &str, bytes: &[u8]) -> Result<ImportedDo
                 text,
                 summary: format!("OpenDocument (.odt) · {paras} stycken inlästa lokalt"),
                 can_export_docx: false,
+                can_export_xlsx: false,
             })
         }
         "xlsx" | "xls" | "xlsm" | "xlsb" | "ods" => {
             let (text, sheets, rows) = extract_spreadsheet_text(bytes)?;
+            let can_xlsx = ext == "xlsx" || ext == "xlsm";
             Ok(ImportedDocument {
                 file_name: file_name.to_string(),
                 format: "xlsx".to_string(),
@@ -61,6 +65,7 @@ pub fn import_document_bytes(file_name: &str, bytes: &[u8]) -> Result<ImportedDo
                     "Kalkylblad (.{ext}) · {sheets} flik(ar), {rows} rader inlästa lokalt"
                 ),
                 can_export_docx: false,
+                can_export_xlsx: can_xlsx,
             })
         }
         "pdf" => {
@@ -72,6 +77,7 @@ pub fn import_document_bytes(file_name: &str, bytes: &[u8]) -> Result<ImportedDo
                 text,
                 summary: format!("PDF-dokument (.pdf) · {char_count} tecken extraherade lokalt"),
                 can_export_docx: false,
+                can_export_xlsx: false,
             })
         }
         _ => {
@@ -83,6 +89,7 @@ pub fn import_document_bytes(file_name: &str, bytes: &[u8]) -> Result<ImportedDo
                 text,
                 summary: format!("Textfil · {lines} rader inlästa lokalt"),
                 can_export_docx: false,
+                can_export_xlsx: false,
             })
         }
     }
@@ -342,18 +349,103 @@ fn replace_text_in_word_xml(
     xml: &str,
     replacements: &[&ReplacementPair],
 ) -> Result<String, String> {
+    replace_text_in_container_xml(xml, b"p", b"t", replacements)
+}
+
+/// Tvåstegs XML-ersättare som hanterar både enskilda `<t>`/`<w:t>`-noder OCH ord som
+/// Word/Excel har delat upp över flera `<w:r><w:t>`-runs inuti samma `<w:p>` eller `<si>`.
+fn replace_text_in_container_xml(
+    xml: &str,
+    container_local_name: &[u8],
+    text_local_name: &[u8],
+    replacements: &[&ReplacementPair],
+) -> Result<String, String> {
+    // Steg 1: samla vilka container-index (t.ex. <w:p> eller <si>) som har en matchning
+    // uppdelad över flera <w:t>/<t>-noder efter att enkla nod-ersättningar gjorts.
+    let mut split_containers: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut consolidated_texts: std::collections::HashMap<usize, String> =
+        std::collections::HashMap::new();
+
+    {
+        let mut reader = XmlReader::from_str(xml);
+        reader.config_mut().trim_text(false);
+        let mut container_idx = 0usize;
+        let mut in_container = false;
+        let mut in_text = false;
+        let mut texts_in_container: Vec<String> = Vec::new();
+
+        loop {
+            match reader.read_event() {
+                Ok(Event::Start(e)) => {
+                    let local = e.local_name();
+                    if local.as_ref() == container_local_name {
+                        in_container = true;
+                        texts_in_container.clear();
+                    } else if in_container && local.as_ref() == text_local_name {
+                        in_text = true;
+                    }
+                }
+                Ok(Event::Text(e)) => {
+                    if in_container && in_text {
+                        let unescaped = e.unescape().map_err(|e| e.to_string())?;
+                        let mut single = unescaped.into_owned();
+                        for rep in replacements {
+                            if single.contains(&rep.original) {
+                                single = single.replace(&rep.original, &rep.replacement);
+                            }
+                        }
+                        texts_in_container.push(single);
+                    }
+                }
+                Ok(Event::End(e)) => {
+                    let local = e.local_name();
+                    if local.as_ref() == text_local_name {
+                        in_text = false;
+                    } else if local.as_ref() == container_local_name && in_container {
+                        in_container = false;
+                        if texts_in_container.len() > 1 {
+                            let combined = texts_in_container.join("");
+                            let mut replaced = combined.clone();
+                            for rep in replacements {
+                                if replaced.contains(&rep.original) {
+                                    replaced = replaced.replace(&rep.original, &rep.replacement);
+                                }
+                            }
+                            if replaced != combined {
+                                split_containers.insert(container_idx);
+                                consolidated_texts.insert(container_idx, replaced);
+                            }
+                        }
+                        container_idx += 1;
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(e) => return Err(format!("XML-analysfel vid export: {e}")),
+                _ => {}
+            }
+        }
+    }
+
+    // Steg 2: skriv ut XML med antingen individuell nod-ersättning eller konsoliderad container-text
     let mut reader = XmlReader::from_str(xml);
     reader.config_mut().trim_text(false);
 
     let mut writer = XmlWriter::new(Cursor::new(Vec::with_capacity(xml.len())));
+    let mut container_idx = 0usize;
+    let mut in_container = false;
     let mut in_wt = false;
+    let mut wt_index_in_container = 0usize;
 
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
-                if e.local_name().as_ref() == b"t" {
+                let local = e.local_name();
+                if local.as_ref() == container_local_name {
+                    in_container = true;
+                    wt_index_in_container = 0;
+                }
+                if local.as_ref() == text_local_name {
                     in_wt = true;
-                    // Säkerställ xml:space="preserve" så att mellanslag runt platshållare bevaras
                     let start_name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
                     let mut elem = BytesStart::new(start_name);
                     let mut has_space = false;
@@ -377,16 +469,26 @@ fn replace_text_in_word_xml(
             }
             Ok(Event::Text(e)) => {
                 if in_wt {
-                    let unescaped = e.unescape().map_err(|e| e.to_string())?;
-                    let mut modified = unescaped.into_owned();
-                    for rep in replacements {
-                        if modified.contains(&rep.original) {
-                            modified = modified.replace(&rep.original, &rep.replacement);
+                    if in_container && split_containers.contains(&container_idx) {
+                        if wt_index_in_container == 0 {
+                            if let Some(cons) = consolidated_texts.get(&container_idx) {
+                                writer
+                                    .write_event(Event::Text(BytesText::new(cons)))
+                                    .map_err(|e| e.to_string())?;
+                            }
                         }
+                    } else {
+                        let unescaped = e.unescape().map_err(|e| e.to_string())?;
+                        let mut modified = unescaped.into_owned();
+                        for rep in replacements {
+                            if modified.contains(&rep.original) {
+                                modified = modified.replace(&rep.original, &rep.replacement);
+                            }
+                        }
+                        writer
+                            .write_event(Event::Text(BytesText::new(&modified)))
+                            .map_err(|e| e.to_string())?;
                     }
-                    writer
-                        .write_event(Event::Text(BytesText::new(&modified)))
-                        .map_err(|e| e.to_string())?;
                 } else {
                     writer
                         .write_event(Event::Text(e))
@@ -394,8 +496,13 @@ fn replace_text_in_word_xml(
                 }
             }
             Ok(Event::End(e)) => {
-                if e.local_name().as_ref() == b"t" {
+                let local = e.local_name();
+                if local.as_ref() == text_local_name {
                     in_wt = false;
+                    wt_index_in_container += 1;
+                } else if local.as_ref() == container_local_name && in_container {
+                    in_container = false;
+                    container_idx += 1;
                 }
                 let end_name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
                 writer
@@ -406,12 +513,77 @@ fn replace_text_in_word_xml(
             Ok(other) => {
                 writer.write_event(other).map_err(|e| e.to_string())?;
             }
-            Err(e) => return Err(format!("XML-fel vid Word-export: {e}")),
+            Err(e) => return Err(format!("XML-fel vid dokumentexport: {e}")),
         }
     }
 
     let bytes = writer.into_inner().into_inner();
     String::from_utf8(bytes).map_err(|e| e.to_string())
+}
+
+/// Skapar ett nytt maskerat Excel-dokument (.xlsx) direkt från originalets .xlsx-bytes
+/// genom att ersätta aktiva träffar i `xl/sharedStrings.xml` och `xl/worksheets/sheet*.xml`
+/// med bibehållna flikar, formler, kolumnbredder och cellformat.
+pub fn export_masked_xlsx_bytes(
+    original_xlsx_bytes: &[u8],
+    replacements: &[ReplacementPair],
+) -> Result<Vec<u8>, String> {
+    let reader_cursor = Cursor::new(original_xlsx_bytes);
+    let mut archive = ZipArchive::new(reader_cursor)
+        .map_err(|e| format!("Kunde inte öppna käll-xlsx för export: {e}"))?;
+
+    let mut out_buf: Vec<u8> = Vec::with_capacity(original_xlsx_bytes.len());
+    {
+        let out_cursor = Cursor::new(&mut out_buf);
+        let mut writer = ZipWriter::new(out_cursor);
+
+        let mut sorted_reps: Vec<&ReplacementPair> = replacements
+            .iter()
+            .filter(|r| !r.original.is_empty())
+            .collect();
+        sorted_reps.sort_by(|a, b| b.original.len().cmp(&a.original.len()));
+
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
+            let name = file.name().to_string();
+            let options = SimpleFileOptions::default().compression_method(file.compression());
+
+            if name == "xl/sharedStrings.xml" {
+                let mut xml_str = String::new();
+                file.read_to_string(&mut xml_str)
+                    .map_err(|e| format!("Kunde inte läsa {name}: {e}"))?;
+                let masked_xml = replace_text_in_container_xml(&xml_str, b"si", b"t", &sorted_reps)?;
+                writer
+                    .start_file(&name, options)
+                    .map_err(|e| e.to_string())?;
+                writer
+                    .write_all(masked_xml.as_bytes())
+                    .map_err(|e| e.to_string())?;
+            } else if name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml") {
+                let mut xml_str = String::new();
+                file.read_to_string(&mut xml_str)
+                    .map_err(|e| format!("Kunde inte läsa {name}: {e}"))?;
+                let masked_xml = replace_text_in_container_xml(&xml_str, b"is", b"t", &sorted_reps)?;
+                writer
+                    .start_file(&name, options)
+                    .map_err(|e| e.to_string())?;
+                writer
+                    .write_all(masked_xml.as_bytes())
+                    .map_err(|e| e.to_string())?;
+            } else {
+                let mut raw_bytes = Vec::new();
+                file.read_to_end(&mut raw_bytes).map_err(|e| e.to_string())?;
+                writer
+                    .start_file(&name, options)
+                    .map_err(|e| e.to_string())?;
+                writer.write_all(&raw_bytes).map_err(|e| e.to_string())?;
+            }
+        }
+
+        writer.finish().map_err(|e| e.to_string())?;
+    }
+
+    Ok(out_buf)
 }
 
 /// Extraherar text ur OpenDocument Text (.odt) via content.xml.
@@ -656,5 +828,35 @@ mod tests {
         assert!(reimported.text.contains("[E-POST 1]"));
         assert!(!reimported.text.contains("Anders Andersson"));
         assert!(!reimported.text.contains("19850515-1234"));
+    }
+
+    #[test]
+    fn masks_split_runs_across_wt_nodes_in_docx() {
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let mut zip = ZipWriter::new(cursor);
+            let options = SimpleFileOptions::default();
+            zip.start_file("word/document.xml", options).unwrap();
+            // Word delar ofta upp ett namn över flera <w:r><w:t>-noder p.g.a. stavningskontroll
+            let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+<w:p><w:r><w:t>Ansvarig läkare: </w:t></w:r><w:r><w:t>Anders </w:t></w:r><w:proofErr w:type="spellStart"/><w:r><w:t>Andersson</w:t></w:r></w:p>
+</w:body></w:document>"#;
+            zip.write_all(xml.as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+
+        let masked = export_masked_docx_bytes(
+            &buf,
+            &[ReplacementPair {
+                original: "Anders Andersson".into(),
+                replacement: "[PERSON A]".into(),
+            }],
+        )
+        .expect("mask split-run docx");
+
+        let reimported = import_document_bytes("split.docx", &masked).expect("reimport split docx");
+        assert_eq!(reimported.text, "Ansvarig läkare: [PERSON A]");
     }
 }

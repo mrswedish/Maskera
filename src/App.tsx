@@ -229,6 +229,9 @@ export default function App() {
   const [originalDocxBytes, setOriginalDocxBytes] = useState<number[] | null>(
     null
   );
+  const [originalXlsxBytes, setOriginalXlsxBytes] = useState<number[] | null>(
+    null
+  );
   const [importingDoc, setImportingDoc] = useState(false);
   const [isEditing, setIsEditing] = useState(true);
 
@@ -596,6 +599,7 @@ export default function App() {
       setFileName("Urklipp (inklistrad)");
       setDocSummary("Inklistrad text från urklipp");
       setOriginalDocxBytes(null);
+      setOriginalXlsxBytes(null);
       setIsEditing(true);
       setHasAnalyzed(false);
       setReport(null);
@@ -621,6 +625,7 @@ export default function App() {
       setFileName(imported.file_name);
       setDocSummary(imported.summary);
       setOriginalDocxBytes(imported.can_export_docx ? byteArr : null);
+      setOriginalXlsxBytes(imported.can_export_xlsx ? byteArr : null);
       setIsEditing(true);
       setHasAnalyzed(false);
       setReport(null);
@@ -792,6 +797,91 @@ export default function App() {
       });
     } catch (e) {
       alert("Kunde inte exportera maskerad .docx: " + String(e));
+    }
+  };
+
+  // Spara maskerad Excel-arbetsbok (.xlsx) med bibehållen formatering
+  const handleSaveMaskedXlsx = async () => {
+    if (!originalXlsxBytes) return;
+    const defaultName = fileName
+      ? fileName.replace(/\.[^/.]+$/, "") + "_maskerad.xlsx"
+      : "maskerad_arbetsbok.xlsx";
+    const path = await save({
+      defaultPath: defaultName,
+      filters: [{ name: "Excel-arbetsbok", extensions: ["xlsx"] }],
+    });
+    if (!path) return;
+
+    const replacements: ReplacementPair[] = [
+      ...activeTranslationTable.values(),
+    ].map((entry) => ({
+      original: entry.originalText,
+      replacement: `[${entry.maskedLabel.toUpperCase()}]`,
+    }));
+
+    try {
+      await invoke("export_masked_xlsx", {
+        path,
+        originalBytes: originalXlsxBytes,
+        replacements,
+      });
+    } catch (e) {
+      alert("Kunde inte exportera maskerad .xlsx: " + String(e));
+    }
+  };
+
+  // Avmaskera ett Word- (.docx) eller Excel-dokument (.xlsx) tillbaka till originalvärden
+  const handleUnmaskDocumentFile = async (file: File) => {
+    if (activeTranslationTable.size === 0) {
+      alert("Det finns inga aktiva mappningar i översättningstabellen att avmaskera med.");
+      return;
+    }
+    const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+    const isDocx = ext === "docx";
+    const isXlsx = ext === "xlsx" || ext === "xlsm";
+    if (!isDocx && !isXlsx) {
+      alert("Välj en .docx- eller .xlsx-fil för formateringsbevarande avmaskering.");
+      return;
+    }
+
+    const defaultName =
+      file.name.replace(/\.[^/.]+$/, "") +
+      (isDocx ? "_avmaskerad.docx" : "_avmaskerad.xlsx");
+    const path = await save({
+      defaultPath: defaultName,
+      filters: [
+        isDocx
+          ? { name: "Word-dokument", extensions: ["docx"] }
+          : { name: "Excel-arbetsbok", extensions: ["xlsx"] },
+      ],
+    });
+    if (!path) return;
+
+    // Bygg omvända ersättningspar (inkl. versaler, gemener och Titel-case för platshållare)
+    const replacements: ReplacementPair[] = [];
+    for (const entry of activeTranslationTable.values()) {
+      const upper = `[${entry.maskedLabel.toUpperCase()}]`;
+      const exact = `[${entry.maskedLabel}]`;
+      const lower = `[${entry.maskedLabel.toLowerCase()}]`;
+      replacements.push({ original: upper, replacement: entry.originalText });
+      if (exact !== upper) {
+        replacements.push({ original: exact, replacement: entry.originalText });
+      }
+      if (lower !== upper && lower !== exact) {
+        replacements.push({ original: lower, replacement: entry.originalText });
+      }
+    }
+
+    try {
+      const buf = await file.arrayBuffer();
+      const originalBytes = Array.from(new Uint8Array(buf));
+      await invoke(isDocx ? "export_masked_docx" : "export_masked_xlsx", {
+        path,
+        originalBytes,
+        replacements,
+      });
+    } catch (e) {
+      alert("Kunde inte avmaskera dokumentet: " + String(e));
     }
   };
 
@@ -1718,6 +1808,18 @@ export default function App() {
                     <span>Spara maskerad .docx</span>
                   </button>
                 )}
+                {originalXlsxBytes && (
+                  <button
+                    type="button"
+                    className="tb-btn"
+                    onClick={handleSaveMaskedXlsx}
+                    disabled={!sourceText}
+                    title="Spara en maskerad kopia av Excel-arbetsboken (.xlsx) med bibehållen formatering och formler"
+                  >
+                    <Download size={14} aria-hidden="true" />
+                    <span>Spara maskerad .xlsx</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   className="tb-btn"
@@ -1879,13 +1981,32 @@ export default function App() {
                 <span>
                   {unmaskedResult.replacements > 0 ? (
                     <>
-                      <Check size={14} />
+                      <Check size={14} aria-hidden="true" />
                       <strong>{unmaskedResult.replacements}</strong> platshållare återställda lokalt
                     </>
                   ) : (
                     "Inga platshållare hittades i svaret än."
                   )}
                 </span>
+                <label
+                  className="tb-btn"
+                  title="Välj ett maskerat Word- (.docx) eller Excel-dokument (.xlsx) för att spara en återställd (avmaskerad) kopia med bibehållen formatering"
+                >
+                  <Upload size={14} aria-hidden="true" />
+                  <span>Avmaskera .docx / .xlsx-fil</span>
+                  <input
+                    type="file"
+                    accept=".docx,.xlsx,.xlsm"
+                    style={{ display: "none" }}
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) {
+                        handleUnmaskDocumentFile(f);
+                        e.target.value = "";
+                      }
+                    }}
+                  />
+                </label>
               </div>
             </div>
           </div>
