@@ -196,9 +196,15 @@ export default function App() {
 
   // Analys-tillstånd
   const [analyzing, setAnalyzing] = useState(false);
+  const [classifying, setClassifying] = useState(false);
+  const [hasAnalyzed, setHasAnalyzed] = useState(false);
   const [matches, setMatches] = useState<Match[]>([]);
   const [ignoredKeys, setIgnoredKeys] = useState<Set<string>>(new Set());
   const [lastDurationMs, setLastDurationMs] = useState<number | null>(null);
+  const [nerProgress, setNerProgress] = useState<{
+    chunk: number;
+    total: number;
+  } | null>(null);
 
   // AI-gatekeeper (EmbeddingGemma 2 + Secret regex)
   const [report, setReport] = useState<ClassificationReport | null>(null);
@@ -206,6 +212,15 @@ export default function App() {
   const [gemmaLoading, setGemmaLoading] = useState(false);
   const [gemmaReady, setGemmaReady] = useState(false);
   const [gemmaStatus, setGemmaStatus] = useState<string>("");
+  const [gemmaScanProgress, setGemmaScanProgress] = useState<{
+    chunk: number;
+    total: number;
+  } | null>(null);
+  const [gemmaDownloadProgress, setGemmaDownloadProgress] = useState<{
+    file: string;
+    downloaded: number;
+    total: number;
+  } | null>(null);
 
   // Modellstatus (BERT NER)
   const [nerReady, setNerReady] = useState(false);
@@ -257,7 +272,10 @@ export default function App() {
         if (!active) return;
         setNerReady(true);
       }),
-      listen<{ chunk: number; total: number }>("ner_progress", () => {}),
+      listen<{ chunk: number; total: number }>("ner_progress", (e) => {
+        if (!active) return;
+        setNerProgress(e.payload);
+      }),
       listen<{ message: string }>("model_status", (e) => {
         if (!active) return;
         setNerStatus(e.payload.message);
@@ -271,14 +289,22 @@ export default function App() {
         if (!active) return;
         setGemmaReady(true);
         setGemmaLoading(false);
+        setGemmaDownloadProgress(null);
       }),
       listen<{ message: string }>("gemma_status", (e) => {
         if (!active) return;
         setGemmaStatus(e.payload.message);
       }),
+      listen<{ chunk: number; total: number }>("gemma_scan_progress", (e) => {
+        if (!active) return;
+        setGemmaScanProgress(e.payload);
+      }),
       listen<{ file: string; downloaded: number; total: number }>(
         "gemma_download_progress",
-        () => {}
+        (e) => {
+          if (!active) return;
+          setGemmaDownloadProgress(e.payload);
+        }
       ),
     ]).then((fns) => {
       unlisteners.push(...fns);
@@ -332,45 +358,85 @@ export default function App() {
     [sourceText, activeMatches, activeTranslationTable]
   );
 
-  // Kör klassificering när träffar eller ignoredKeys ändras
+  // Kör full semantisk klassificering (Lager 3 EmbeddingGemma 2)
+  const runSemanticClassification = useCallback(
+    async (
+      origText: string,
+      currMatches: Match[],
+      currIgnored: Set<string>,
+      reuseCachedFindings: boolean
+    ) => {
+      if (!origText.trim()) {
+        setReport(null);
+        return;
+      }
+
+      const currActive = currMatches.filter((m) => !currIgnored.has(matchKey(m)));
+      const currTable = buildTranslationTable(currActive);
+      const currMasked = buildMaskedText(origText, currActive, currTable);
+
+      const activePii = currActive.filter(
+        (m) => m.label !== "Hemlighet/Nyckel"
+      ).length;
+      const unmaskedPii = currMatches
+        .filter((m) => currIgnored.has(matchKey(m)))
+        .filter((m) => m.label !== "Hemlighet/Nyckel").length;
+      const totalSecrets = currMatches.filter(
+        (m) => m.label === "Hemlighet/Nyckel"
+      ).length;
+      const unmaskedSecrets = currMatches
+        .filter((m) => currIgnored.has(matchKey(m)))
+        .filter((m) => m.label === "Hemlighet/Nyckel").length;
+
+      const canReuse =
+        reuseCachedFindings &&
+        report !== null &&
+        report.semantic_available === gemmaReady;
+
+      if (!canReuse) {
+        setClassifying(true);
+        setGemmaScanProgress(null);
+      }
+
+      try {
+        const rep = await invoke<ClassificationReport>("classify_document", {
+          originalText: origText,
+          maskedText: currMasked,
+          activePiiCount: activePii,
+          unmaskedPiiCount: unmaskedPii,
+          secretCount: totalSecrets,
+          unmaskedSecretCount: unmaskedSecrets,
+          cachedFindings: canReuse ? report.findings : null,
+          cachedParagraphsScanned: canReuse ? report.paragraphs_scanned : null,
+          cachedDurationMs: canReuse ? report.scan_duration_ms : null,
+        });
+        setReport(rep);
+      } catch (e) {
+        console.error("Klassificeringsfel:", e);
+      } finally {
+        if (!canReuse) {
+          setClassifying(false);
+          setGemmaScanProgress(null);
+        }
+      }
+    },
+    [report, gemmaReady]
+  );
+
+  // Uppdatera trafikljus direkt (< 1 ms med cachade styckefynd) när användaren klickar på ord
   useEffect(() => {
-    if (!sourceText) {
-      setReport(null);
-      return;
+    if (!hasAnalyzed || !sourceText.trim()) return;
+    runSemanticClassification(sourceText, matches, ignoredKeys, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ignoredKeys, matches]);
+
+  // Om EmbeddingGemma 2 blir klar i bakgrunden efter att ett dokument redan analyserats, kör semantisk skanning
+  useEffect(() => {
+    if (gemmaReady && hasAnalyzed && sourceText.trim() && !report?.semantic_available) {
+      runSemanticClassification(sourceText, matches, ignoredKeys, false);
     }
-
-    let active = true;
-    const activePii = activeMatches.filter(
-      (m) => m.label !== "Hemlighet/Nyckel"
-    ).length;
-    const unmaskedPii = matches
-      .filter((m) => ignoredKeys.has(matchKey(m)))
-      .filter((m) => m.label !== "Hemlighet/Nyckel").length;
-
-    const totalSecrets = matches.filter(
-      (m) => m.label === "Hemlighet/Nyckel"
-    ).length;
-    const unmaskedSecrets = matches
-      .filter((m) => ignoredKeys.has(matchKey(m)))
-      .filter((m) => m.label === "Hemlighet/Nyckel").length;
-
-    invoke<ClassificationReport>("classify_document", {
-      originalText: sourceText,
-      maskedText,
-      activePiiCount: activePii,
-      unmaskedPiiCount: unmaskedPii,
-      secretCount: totalSecrets,
-      unmaskedSecretCount: unmaskedSecrets,
-    })
-      .then((rep) => {
-        if (active) setReport(rep);
-      })
-      .catch((e) => console.error("Klassificeringsfel:", e));
-
-    return () => {
-      active = false;
-    };
-  }, [sourceText, maskedText, activeMatches, matches, ignoredKeys]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gemmaReady]);
 
   // Uppdatera avmaskerat svar live
   useEffect(() => {
@@ -408,6 +474,8 @@ export default function App() {
       setSourceText(normalizeInputText(text));
       setFileName("Urklipp (inklistrad)");
       setIsEditing(true);
+      setHasAnalyzed(false);
+      setReport(null);
       setMatches([]);
       setIgnoredKeys(new Set());
       setLastDurationMs(null);
@@ -416,12 +484,11 @@ export default function App() {
     }
   };
 
-
-
-  // Analysera text
+  // Analysera text (Steg 1: Regex + BERT NER, Steg 2: EmbeddingGemma 2)
   const handleAnalyze = async () => {
-    if (!sourceText.trim() || analyzing) return;
+    if (!sourceText.trim() || analyzing || classifying) return;
     setAnalyzing(true);
+    setNerProgress(null);
     const t0 = performance.now();
     try {
       const raw = await invoke<Match[]>("analyze_text", {
@@ -429,15 +496,24 @@ export default function App() {
         entities: selectedEntities,
         threshold,
       });
-      const result = fixByteOffsets(sourceText, raw);
-      setMatches(result.sort((a, b) => a.start - b.start));
-      setIgnoredKeys(new Set());
+      const sorted = fixByteOffsets(sourceText, raw).sort(
+        (a, b) => a.start - b.start
+      );
+      const emptyIgnored = new Set<string>();
+      setMatches(sorted);
+      setIgnoredKeys(emptyIgnored);
       setLastDurationMs(performance.now() - t0);
       setIsEditing(false);
+      setHasAnalyzed(true);
+      setAnalyzing(false);
+      setNerProgress(null);
+
+      // Steg 2: Kör semantisk kontextanalys med EmbeddingGemma 2
+      await runSemanticClassification(sourceText, sorted, emptyIgnored, false);
     } catch (err) {
       alert("Fel vid analys: " + String(err));
-    } finally {
       setAnalyzing(false);
+      setNerProgress(null);
     }
   };
 
@@ -658,23 +734,58 @@ export default function App() {
 
         <div className="header-status-pills">
           <span
-            className={`status-pill ${nerReady ? "ready" : "loading"}`}
+            className={`status-pill ${
+              analyzing ? "working" : nerReady ? "ready" : "loading"
+            }`}
             title={nerStatus}
           >
-            BERT NER: {nerReady ? "Aktiv" : "Laddar…"}
+            {analyzing && <RefreshCw size={12} className="spin" />}
+            <span>
+              BERT NER:{" "}
+              {analyzing
+                ? nerProgress && nerProgress.total > 0
+                  ? `Skannar (${nerProgress.chunk}/${nerProgress.total})…`
+                  : "Skannar…"
+                : nerReady
+                ? "Aktiv"
+                : "Laddar…"}
+            </span>
           </span>
           <span
             className={`status-pill ${
-              gemmaReady ? "ready" : gemmaInstalled ? "loading" : "off"
+              classifying
+                ? "working"
+                : gemmaLoading
+                ? "loading"
+                : gemmaReady
+                ? "ready"
+                : gemmaInstalled
+                ? "loading"
+                : "off"
             }`}
             title={gemmaStatus || (gemmaReady ? "Aktiv" : "Ej laddad")}
           >
-            EmbeddingGemma 2:{" "}
-            {gemmaReady
-              ? "Aktiv (Lager 3)"
-              : gemmaLoading
-              ? "Laddar…"
-              : "Valfri"}
+            {(classifying || gemmaLoading) && (
+              <RefreshCw size={12} className="spin" />
+            )}
+            <span>
+              EmbeddingGemma 2:{" "}
+              {classifying
+                ? gemmaScanProgress && gemmaScanProgress.total > 0
+                  ? `Analyserar kontext (${gemmaScanProgress.chunk}/${gemmaScanProgress.total})…`
+                  : "Analyserar kontext…"
+                : gemmaLoading
+                ? gemmaDownloadProgress && gemmaDownloadProgress.total > 0
+                  ? `Laddar ner (${Math.round(
+                      (gemmaDownloadProgress.downloaded /
+                        gemmaDownloadProgress.total) *
+                        100
+                    )}%)…`
+                  : "Initierar modell…"
+                : gemmaReady
+                ? "Aktiv (Lager 3)"
+                : "Valfri"}
+            </span>
           </span>
         </div>
       </header>
@@ -711,6 +822,8 @@ export default function App() {
                 r.onload = (ev) => {
                   setSourceText(normalizeInputText(ev.target?.result as string));
                   setIsEditing(true);
+                  setHasAnalyzed(false);
+                  setReport(null);
                   setMatches([]);
                   setIgnoredKeys(new Set());
                   setLastDurationMs(null);
@@ -757,11 +870,21 @@ export default function App() {
             type="button"
             className="tb-btn-primary"
             onClick={handleAnalyze}
-            disabled={!sourceText.trim() || analyzing}
-            title="Kör lokal regex- och AI-analys"
+            disabled={!sourceText.trim() || analyzing || classifying}
+            title="Kör lokal regex-, BERT NER- och EmbeddingGemma 2-analys"
           >
-            <Sparkles size={16} aria-hidden="true" />
-            <span>{analyzing ? "Skannar…" : "Granska & Maskera"}</span>
+            {analyzing || classifying ? (
+              <RefreshCw size={16} className="spin" aria-hidden="true" />
+            ) : (
+              <Sparkles size={16} aria-hidden="true" />
+            )}
+            <span>
+              {analyzing
+                ? "Steg 1/2: Maskerar…"
+                : classifying
+                ? "Steg 2/2: Klassificerar…"
+                : "Granska & Maskera"}
+            </span>
           </button>
 
           {/* Kopiera maskerad text med Modern Web Guidance live-region */}
@@ -881,63 +1004,124 @@ export default function App() {
       )}
 
       {/* ── 4. AI-Gatekeeper & Säkerhetsstatus (Lager 3) ── */}
-      {sourceText && (
+      {sourceText && (analyzing || classifying || report !== null) && (
         <section
           aria-label="AI-säkerhetsbedömning"
-          className={`gatekeeper-banner ${afterBadge.className}`}
+          className={`gatekeeper-banner ${
+            analyzing || classifying ? "badge-working" : afterBadge.className
+          }`}
         >
-          <div className="gatekeeper-header">
-            <div className="gatekeeper-badge">
-              {afterBadge.icon}
-              <strong>Efter maskering: {afterBadge.text}</strong>
-            </div>
-
-            <div className="gatekeeper-meta">
-              <span className="before-status">
-                Före maskering: <em>{beforeBadge.text}</em>
-              </span>
-              {lastDurationMs !== null && (
-                <span className="latency-tag">
-                  Skannad på {Math.round(lastDurationMs)} ms
-                </span>
-              )}
-            </div>
-          </div>
-
-          <p className="gatekeeper-summary">{report?.summary_after}</p>
-
-          {/* Känsliga stycken flaggade av EmbeddingGemma 2 */}
-          {report?.findings && report.findings.length > 0 && (
-            <div className="gatekeeper-findings">
-              <div className="findings-title">
-                <AlertTriangle size={14} />
-                <span>
-                  Flaggade stycken ({report.findings.length} st med känslig kontext):
+          {analyzing || classifying ? (
+            <div className="gatekeeper-working" role="status" aria-live="polite">
+              <div className="gatekeeper-working-row">
+                <RefreshCw size={16} className="spin" />
+                <strong>
+                  {analyzing
+                    ? "Steg 1/2: Identifierar personuppgifter, kortnummer & interna länkar (Regex + BERT NER)…"
+                    : "Steg 2/2: EmbeddingGemma 2 analyserar dokumentets kontext & säkerhetsklassning…"}
+                </strong>
+                <span className="gatekeeper-step-count">
+                  {analyzing && nerProgress && nerProgress.total > 0
+                    ? `Del ${nerProgress.chunk} av ${nerProgress.total}`
+                    : classifying &&
+                      gemmaScanProgress &&
+                      gemmaScanProgress.total > 0
+                    ? `Avsnitt ${gemmaScanProgress.chunk} av ${gemmaScanProgress.total}`
+                    : "Arbetar lokalt…"}
                 </span>
               </div>
-              <ul className="findings-list">
-                {report.findings.map((f, i) => (
-                  <li key={i} className={`finding-item ${f.severity}`}>
-                    <span className="finding-category">
-                      Stycke {f.paragraph_index} · {f.category}
-                    </span>
-                    <span className="finding-preview">”{f.preview}”</span>
-                    <span className="finding-reason">{f.reason}</span>
-                  </li>
-                ))}
-              </ul>
+              <div className="gatekeeper-progress-track">
+                <div
+                  className="gatekeeper-progress-fill"
+                  style={{
+                    width:
+                      analyzing && nerProgress && nerProgress.total > 0
+                        ? `${Math.max(
+                            12,
+                            Math.round((nerProgress.chunk / nerProgress.total) * 100)
+                          )}%`
+                        : classifying &&
+                          gemmaScanProgress &&
+                          gemmaScanProgress.total > 0
+                        ? `${Math.max(
+                            15,
+                            Math.round(
+                              (gemmaScanProgress.chunk / gemmaScanProgress.total) *
+                                100
+                            )
+                          )}%`
+                        : "45%",
+                  }}
+                />
+              </div>
             </div>
+          ) : (
+            <>
+              <div className="gatekeeper-header">
+                <div className="gatekeeper-badge">
+                  {afterBadge.icon}
+                  <strong>Efter maskering: {afterBadge.text}</strong>
+                </div>
+
+                <div className="gatekeeper-meta">
+                  <span className="before-status">
+                    Före maskering: <em>{beforeBadge.text}</em>
+                  </span>
+                  {lastDurationMs !== null && (
+                    <span className="latency-tag">
+                      BERT + Regex: {Math.round(lastDurationMs)} ms
+                    </span>
+                  )}
+                  {report?.semantic_available && (
+                    <span className="latency-tag gemma-tag">
+                      EmbeddingGemma 2: {report.paragraphs_scanned} avsnitt på{" "}
+                      {report.scan_duration_ms} ms
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <p className="gatekeeper-summary">{report?.summary_after}</p>
+
+              {/* Känsliga stycken flaggade av EmbeddingGemma 2 */}
+              {report?.findings && report.findings.length > 0 && (
+                <div className="gatekeeper-findings">
+                  <div className="findings-title">
+                    <AlertTriangle size={14} />
+                    <span>
+                      Flaggade avsnitt från EmbeddingGemma 2 ({report.findings.length}{" "}
+                      st med känslig kontext):
+                    </span>
+                  </div>
+                  <ul className="findings-list">
+                    {report.findings.map((f, i) => (
+                      <li key={i} className={`finding-item ${f.severity}`}>
+                        <span className="finding-category">
+                          Avsnitt {f.paragraph_index} · {f.category}
+                        </span>
+                        <span className="finding-confidence">
+                          {Math.round(f.confidence * 100)}% träffsäkerhet
+                        </span>
+                        <span className="finding-preview">”{f.preview}”</span>
+                        <span className="finding-reason">{f.reason}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </>
           )}
 
           {/* CTA för att ladda ner EmbeddingGemma 2 om den inte är installerad */}
-          {!gemmaInstalled && (
+          {!gemmaInstalled && !analyzing && !classifying && (
             <div className="gemma-cta-box">
               <div className="gemma-cta-text">
                 <Sparkles size={16} />
                 <span>
                   <strong>Aktivera djup AI-kontextgranskning:</strong> Hämta
                   EmbeddingGemma 2 (~197 MB lokalt) för att automatiskt upptäcka
-                  hälsouppgifter (GDPR Art. 9), företagshemligheter och IT-säkerhet.
+                  hälsouppgifter (GDPR Art. 9), tjänstekort/eID, företagshemligheter
+                  och IT-säkerhet.
                 </span>
               </div>
               <button
@@ -1041,6 +1225,8 @@ export default function App() {
                     r.onload = (ev) => {
                       setSourceText(normalizeInputText(ev.target?.result as string));
                       setIsEditing(true);
+                      setHasAnalyzed(false);
+                      setReport(null);
                       setMatches([]);
                       setIgnoredKeys(new Set());
                       setLastDurationMs(null);
@@ -1055,7 +1241,11 @@ export default function App() {
                   value={sourceText}
                   onChange={(e) => {
                     setSourceText(e.target.value);
-                    if (matches.length > 0) setMatches([]);
+                    if (matches.length > 0 || hasAnalyzed) {
+                      setMatches([]);
+                      setHasAnalyzed(false);
+                      setReport(null);
+                    }
                   }}
                 />
                 {!sourceText && (

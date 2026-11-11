@@ -13,6 +13,9 @@ use crate::ner::get_ort_env;
 const EMBED_DIM: usize = 768;
 const MAX_PARAGRAPH_CHARS: usize = 1200;
 const MIN_PARAGRAPH_CHARS: usize = 25;
+/// Kortare rader (t.ex. i mejl med dubbla radbrytningar) slås ihop upp till ~320 tecken
+/// så att modellen får sammanhängande kontext och färre anrop.
+const MERGE_TARGET_CHARS: usize = 320;
 const BATCH_SIZE: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +43,8 @@ pub struct ClassificationReport {
     pub unmasked_pii_count: usize,
     pub secret_count: usize,
     pub semantic_available: bool,
+    pub paragraphs_scanned: usize,
+    pub scan_duration_ms: u64,
     pub findings: Vec<ParagraphFinding>,
 }
 
@@ -59,17 +64,19 @@ const PROTOTYPE_GROUPS: &[PrototypeGroup] = &[
         reason: "Beskriver medicinskt tillstånd, diagnos, behandling eller vårdkontakt som kan röja känsliga personuppgifter även utan namn.",
         prompts: &[
             "Patientjournal, sjukdomshistoria, medicinsk diagnos, läkemedelsbehandling, psykiatrisk bedömning, sjukskrivning eller rehabiliteringsärende.",
-            "Beskrivning av en persons fysiska eller psykiska hälsotillstånd, symtom, operation, vårdplan, missbruk eller funktionsnedsättning.",
+            "Beskrivning av en persons fysiska eller psykiska hälsotillstånd, symtom, operation, vårdplan, provsvar, missbruk eller funktionsnedsättning.",
+            "Patienten har varit sjukskriven på grund av utmattning, depression, ångest, smärta eller genomgår utredning och medicinering inom vården.",
         ],
     },
     PrototypeGroup {
         category: "Känslig personuppgift / Lagöverträdelse (GDPR Art. 9–10)",
         axis: "integritet",
         severity: "high",
-        reason: "Innehåller uppgifter om brottsmisstanke, rättsprocess, politisk åsikt, fackförening, religion eller myndighetsutredning.",
+        reason: "Innehåller uppgifter om brottsmisstanke, rättsprocess, socialtjänst, politisk åsikt, fackförening eller religion.",
         prompts: &[
             "Uppgifter om politiska åsikter, partimedlemskap, facklig tillhörighet, religiös övertygelse eller sexuell läggning.",
-            "Brottsmisstanke, polisanmälan, förundersökning, dom i brottmål, disciplinärende, tvångsvård eller utredning hos socialtjänsten.",
+            "Brottsmisstanke, polisanmälan, förundersökning, åtal, dom i brottmål, disciplinärende, tvångsvård eller utredning hos socialtjänsten.",
+            "Orosanmälan, ekonomiskt bistånd, skuldsanering hos Kronofogden, omhändertagande enligt LVU eller LVM eller pågående rättstvist.",
         ],
     },
     PrototypeGroup {
@@ -79,7 +86,8 @@ const PROTOTYPE_GROUPS: &[PrototypeGroup] = &[
         reason: "Liknar intern affärsstrategi, opublicerade siffror, prissättning, förvärvsbud eller konfidentiella avtalsvillkor.",
         prompts: &[
             "Konfidentiell affärsstrategi, företagshemlighet, opublicerat bokslut, intern budget, vinstmarginal, företagsförvärv eller styrelseprotokoll.",
-            "Icke-offentlig kundoffert, konfidentiellt avtal, timpriser, rabattstruktur, upphandlingsanbud eller förhandlingsstrategi.",
+            "Icke-offentlig kundoffert, konfidentiellt avtal, timpriser, rabattstruktur, inköpspriser, upphandlingsanbud eller förhandlingsstrategi.",
+            "Inför styrelsemötet föreslår vi ett konfidentiellt bud, opublicerad omsättningsprognos, bruttomarginal eller exklusivt samarbetsavtal innan rapporten offentliggörs.",
         ],
     },
     PrototypeGroup {
@@ -89,7 +97,18 @@ const PROTOTYPE_GROUPS: &[PrototypeGroup] = &[
         reason: "Berör intern IT-säkerhet, sårbarheter, nätverks-/systemarkitektur, behörigheter eller proprietär systemlogik.",
         prompts: &[
             "Intern IT-säkerhet, sårbarhetsrapport, penetrationstest, brandväggsregler, intern nätverksarkitektur, säkerhetsincident eller åtkomstkontroller.",
-            "Proprietär intern källkod, produktionskonfiguration, databasstruktur med affärslogik eller säkerhetsklassad verksamhet.",
+            "Proprietär intern källkod, produktionskonfiguration, databasstruktur med affärslogik, API-nycklar eller säkerhetsklassad verksamhet.",
+            "Vid säkerhetsgranskningen upptäcktes en sårbarhet i autentiseringstjänsten bakom brandväggen som ger obehörig åtkomst till interna system eller databaser.",
+        ],
+    },
+    PrototypeGroup {
+        category: "Tjänstekort, eID, Behörighet & Intranät",
+        axis: "säkerhet",
+        severity: "high",
+        reason: "Innehåller uppgifter om SITHS-kort, tjänstekort, e-legitimation/certifikat, korthandläggare eller interna intranätlänkar och säkerhetsrutiner.",
+        prompts: &[
+            "Ditt SITHS eID certifikat på ditt SITHS-kort, tjänstekort, reservkort eller konsultkort kommer att upphöra och behöver förnyas hos korthandläggare eller ID-fotokontor.",
+            "Intern information om e-legitimation, behörighetskort, HSA-ID, aktivering av tjänstekort, inloggningscertifikat, passerkort eller länk till internt intranät inom region, myndighet eller företag.",
         ],
     },
     PrototypeGroup {
@@ -98,17 +117,17 @@ const PROTOTYPE_GROUPS: &[PrototypeGroup] = &[
         severity: "medium",
         reason: "Innehåller bedömning av medarbetare/kandidat, löneuppgifter, arbetsrättsligt ärende eller intern personalfråga.",
         prompts: &[
-            "Medarbetarsamtal, individuell lönesättning, omplacering, skriftlig varning, arbetsrättslig förhandling, uppsägning eller kandidatbedömning.",
+            "Medarbetarsamtal, individuell lönesättning, löneanspråk, omplacering, skriftlig varning, arbetsrättslig förhandling, uppsägning eller kandidatbedömning.",
         ],
     },
 ];
 
 const NEUTRAL_PROMPTS: &[&str] = &[
     "Allmän informationstext, offentlig webbtext, pressmeddelande, produktbeskrivning eller utbildningsmaterial för allmänheten.",
-    "Vardagligt meddelande om mötestider, agenda, praktisk planering, länk till offentlig rapport eller generella skrivtips.",
-    "Sammanfattning av offentliga riktlinjer, myndighetsrapport, presentation, mötesanteckningar om öppen verksamhet eller allmänt projektarbete.",
-    "Allmän fråga om språkgranskning, sammanfattning av offentlig text, recept, öppen källkod eller generella programmeringskoncept.",
-    "Kort kundfråga om öppettider, leveransstatus eller allmän produktfunktion utan företagshemligheter eller hälsouppgifter.",
+    "Vardagligt meddelande om kaffe, öppen inbjudan till webbinarium, kurs eller publik konferens nästa vecka.",
+    "Sammanfattning av offentliga riktlinjer, publicerad myndighetsrapport, öppen presentation eller generella skrivtips.",
+    "Allmän fråga om språkgranskning, sammanfattning av offentlig artikel, recept, öppen källkod eller generella programmeringskoncept.",
+    "Kort allmän fråga om öppettider, publik leveransinformation eller allmän produktfunktion utan interna system eller personuppgifter.",
 ];
 
 struct EmbeddedPrototype {
@@ -188,7 +207,7 @@ impl EmbeddingClassifier {
         }
 
         let refs: Vec<&str> = all_anchor_texts.iter().map(|s| s.as_str()).collect();
-        let vecs = instance.embed_texts(&refs)?;
+        let vecs = instance.embed_texts_with_progress(&refs, |_, _| {})?;
         for (meta, vec) in anchor_meta.into_iter().zip(vecs) {
             if let Some(g_idx) = meta {
                 instance
@@ -202,10 +221,20 @@ impl EmbeddingClassifier {
         Ok(instance)
     }
 
-    pub fn embed_texts(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
+    pub fn embed_texts_with_progress<F>(
+        &self,
+        texts: &[&str],
+        mut on_progress: F,
+    ) -> Result<Vec<Vec<f32>>, String>
+    where
+        F: FnMut(usize, usize),
+    {
         if texts.is_empty() {
             return Ok(vec![]);
         }
+
+        let total = texts.len();
+        on_progress(0, total);
 
         let encodings = self
             .tokenizer
@@ -223,6 +252,8 @@ impl EmbeddingClassifier {
         let mut order: Vec<usize> = (0..texts.len()).collect();
         order.sort_by_key(|&i| encodings[i].get_ids().len());
 
+        let mut completed = 0usize;
+
         for batch_indices in order.chunks(BATCH_SIZE) {
             let b_size = batch_indices.len();
             let max_len = batch_indices
@@ -231,6 +262,8 @@ impl EmbeddingClassifier {
                 .max()
                 .unwrap_or(0);
             if max_len == 0 {
+                completed += b_size;
+                on_progress(completed, total);
                 continue;
             }
 
@@ -253,8 +286,7 @@ impl EmbeddingClassifier {
             let mask_arr = Array2::from_shape_vec((b_size, max_len), mask_flat)
                 .map_err(|e| e.to_string())?;
 
-            // Viktigt: skapa zero-copy TensorRef per batch utan `.clone()`, eftersom
-            // `Value::clone()` i ort spinner upp en IdentitySession som låser på 0-dimensioner.
+            // Viktigt: skapa zero-copy TensorRef per batch utan `.clone()`
             let ids_ref = TensorRef::from_array_view(&ids_arr).map_err(|e| e.to_string())?;
             let mask_ref = TensorRef::from_array_view(&mask_arr).map_err(|e| e.to_string())?;
             let empty_img = TensorRef::from_array_view(&empty_mm).map_err(|e| e.to_string())?;
@@ -287,24 +319,35 @@ impl EmbeddingClassifier {
                     results[orig_idx] = v;
                 }
             }
+
+            completed += b_size;
+            on_progress(completed, total);
         }
 
         Ok(results)
     }
 
-    pub fn scan_paragraphs(&self, masked_text: &str) -> Vec<ParagraphFinding> {
+    pub fn scan_paragraphs_with_progress<F>(
+        &self,
+        masked_text: &str,
+        on_progress: F,
+    ) -> (Vec<ParagraphFinding>, usize)
+    where
+        F: FnMut(usize, usize),
+    {
         let paragraphs = split_paragraphs(masked_text);
         if paragraphs.is_empty() {
-            return vec![];
+            return (vec![], 0);
         }
+        let total_paras = paragraphs.len();
 
         let formatted: Vec<String> = paragraphs
             .iter()
             .map(|(_, _, slice)| format!("task: classification | query: {slice}"))
             .collect();
         let refs: Vec<&str> = formatted.iter().map(|s| s.as_str()).collect();
-        let Ok(vecs) = self.embed_texts(&refs) else {
-            return vec![];
+        let Ok(vecs) = self.embed_texts_with_progress(&refs, on_progress) else {
+            return (vec![], total_paras);
         };
 
         let mut findings = Vec::new();
@@ -328,17 +371,18 @@ impl EmbeddingClassifier {
             if let Some((g_idx, best_sim)) = best_group {
                 let margin = best_sim - neutral_best;
                 // Kalibrerat mot EmbeddingGemma 2 (768d, `task: classification | query:`):
-                // vardaglig/publik text har margin <= 0.00, medan känsliga stycken ligger på ~0.045..0.11+
-                if best_sim >= 0.77 && margin >= 0.032 {
+                // vardaglig/publik text har margin <= 0.00, medan känsliga stycken ligger på ~0.032..0.19+
+                if best_sim >= 0.76 && margin >= 0.030 {
                     let grp = &PROTOTYPE_GROUPS[g_idx];
-                    let preview: String = slice.chars().take(130).collect();
-                    let preview = if slice.chars().count() > 130 {
+                    let clean_line = slice.replace('\n', " ");
+                    let preview: String = clean_line.chars().take(135).collect();
+                    let preview = if clean_line.chars().count() > 135 {
                         format!("{}…", preview.trim_end())
                     } else {
                         preview
                     };
-                    let conf = (0.62 + ((margin - 0.032) / 0.078) * 0.35).clamp(0.62, 0.97);
-                    let severity = if grp.severity == "high" && (margin >= 0.052 || best_sim >= 0.83)
+                    let conf = (0.62 + ((margin - 0.030) / 0.090) * 0.35).clamp(0.62, 0.98);
+                    let severity = if grp.severity == "high" && (margin >= 0.050 || best_sim >= 0.83)
                     {
                         "high"
                     } else {
@@ -360,12 +404,12 @@ impl EmbeddingClassifier {
             }
         }
 
-        findings
+        (findings, total_paras)
     }
 }
 
 fn split_paragraphs(text: &str) -> Vec<(usize, usize, &str)> {
-    let mut out = Vec::new();
+    let mut raw_paras = Vec::new();
     let mut start = 0usize;
     let bytes = text.as_bytes();
     let mut i = 0usize;
@@ -373,7 +417,7 @@ fn split_paragraphs(text: &str) -> Vec<(usize, usize, &str)> {
     while i < bytes.len() {
         let is_break = bytes[i] == b'\n' && (i + 1 < bytes.len() && bytes[i + 1] == b'\n');
         if is_break {
-            push_paragraph(text, start, i, &mut out);
+            push_paragraph(text, start, i, &mut raw_paras);
             while i < bytes.len() && bytes[i] == b'\n' {
                 i += 1;
             }
@@ -383,9 +427,30 @@ fn split_paragraphs(text: &str) -> Vec<(usize, usize, &str)> {
         }
     }
     if start < bytes.len() {
-        push_paragraph(text, start, bytes.len(), &mut out);
+        push_paragraph(text, start, bytes.len(), &mut raw_paras);
     }
-    out
+
+    // Om texten består av många korta enradiga stycken (t.ex. ett e-postmeddelande med
+    // dubbla radbrytningar mellan varje mening), slå ihop korta grannstycken (< 140 tecken)
+    // upp till MERGE_TARGET_CHARS så att modellen får rikare kontext och färre anrop.
+    let mut merged: Vec<(usize, usize, &str)> = Vec::with_capacity(raw_paras.len());
+    for (p_start, p_end, p_slice) in raw_paras {
+        if let Some((prev_start, prev_end, _)) = merged.last_mut() {
+            let prev_chars = text[*prev_start..*prev_end].chars().count();
+            let curr_chars = p_slice.chars().count();
+            if (prev_chars < 140 || curr_chars < 95)
+                && (prev_chars + curr_chars <= MERGE_TARGET_CHARS)
+            {
+                *prev_end = p_end;
+                continue;
+            }
+        }
+        merged.push((p_start, p_end, p_slice));
+    }
+    for item in &mut merged {
+        item.2 = text[item.0..item.1].trim();
+    }
+    merged
 }
 
 fn push_paragraph<'a>(
@@ -435,6 +500,8 @@ pub fn build_report(
     secret_count: usize,
     unmasked_secret_count: usize,
     semantic_available: bool,
+    paragraphs_scanned: usize,
+    scan_duration_ms: u64,
     findings: Vec<ParagraphFinding>,
 ) -> ClassificationReport {
     let has_high_semantic = findings.iter().any(|f| f.severity == "high");
@@ -474,13 +541,13 @@ pub fn build_report(
     let (verdict_after_mask, summary_after) = if unmasked_secret_count > 0 {
         (
             "do_not_share".to_string(),
-            "Dela ej: Du har avmarkerat en teknisk hemlighet/API-nyckel — den maskerade texten är inte säker att dela!".to_string(),
+            "Dela ej: Du har avmarkerat en teknisk hemlighet/nyckel eller intern länk — den maskerade texten är inte säker att dela!".to_string(),
         )
     } else if has_high_semantic {
         (
             "do_not_share".to_string(),
             format!(
-                "Dela ej i öppen AI: Trots att namn/ID maskerats innehåller {} stycke(n) känslig kontext (hälsa, affärshemlighet eller säkerhet).",
+                "Dela ej i öppen AI: Trots att identifierare har maskerats innehåller {} textavsnitt känslig kontext (t.ex. vård/hälsa, affärshemligheter, eID/tjänstekort eller intern IT-säkerhet).",
                 findings.len()
             ),
         )
@@ -496,7 +563,7 @@ pub fn build_report(
         (
             "caution_after_mask".to_string(),
             format!(
-                "Granska: Personuppgifter är maskerade, men {} stycke(n) har intern karaktär — kontrollera innan delning i extern AI.",
+                "Granska: Personuppgifter är maskerade, men {} textavsnitt har intern karaktär — kontrollera innan delning i extern AI.",
                 findings.len()
             ),
         )
@@ -523,6 +590,8 @@ pub fn build_report(
         unmasked_pii_count,
         secret_count,
         semantic_available,
+        paragraphs_scanned,
+        scan_duration_ms,
         findings,
     }
 }
@@ -545,13 +614,14 @@ mod tests {
         let clf = EmbeddingClassifier::load(&dir).expect("load EmbeddingGemma 2");
 
         let sample = "\
-Hej! Kan du hjälpa mig att formulera om den här inbjudan till vår öppna webbinariedag om hållbar stadsplanering nästa vecka? Vi bjuder på kaffe från kl 09:00.\n\n\
+Hej! Kan du hjälpa mig att formulera om den här inbjudan till vår öppna webbinariedag om hållbar stadsplanering nästa vecka? Vi bjuder på kaffe från kl 09:00 och alla intresserade medborgare är varmt välkomna att anmäla sig.\n\n\
 [PERSON A] har varit sjukskriven på heltid sedan mars på grund av svår utmattningsdepression och panikångest, och behandlas för närvarande med sertralin vid psykiatriska öppenvårdsmottagningen.\n\n\
 Inför styrelsemötet föreslår vi att lägga ett konfidentiellt bud om 145 MSEK på konkurrenten med en beräknad bruttomarginal på 42 procent innan kvartalsrapporten offentliggörs.\n\n\
 Vid gårdagens säkerhetsgranskning upptäcktes en kritisk SQL-injektion i den interna autentiseringstjänsten bakom brandväggen som ger obehörig läsbehörighet till kunddatabasen.\n\n\
-Tack för mötet igår [PERSON B]! Här är en kort sammanfattning av de publika riktlinjerna från Boverket som vi kan ha som underlag till presentationen.";
+Tack för mötet igår [PERSON B]! Här är en kort sammanfattning av de publika riktlinjerna från Boverket som vi kan ha som underlag till den öppna presentationen nästa månad.";
 
-        let findings = clf.scan_paragraphs(sample);
+        let (findings, scanned) = clf.scan_paragraphs_with_progress(sample, |_, _| {});
+        assert_eq!(scanned, 5);
         assert_eq!(findings.len(), 3, "Exakt de 3 känsliga styckena ska flaggas");
         assert_eq!(findings[0].paragraph_index, 2);
         assert_eq!(findings[0].axis, "integritet");
@@ -562,5 +632,37 @@ Tack för mötet igår [PERSON B]! Här är en kort sammanfattning av de publika
         assert_eq!(findings[2].paragraph_index, 4);
         assert_eq!(findings[2].axis, "säkerhet");
         assert_eq!(findings[2].severity, "high");
+
+        let siths = "\
+Hej!\n\n\
+Ditt SITHS eID (certifikat) på ditt SITHS-kort nr. [KORTNUMMER 1] med utgångsdatum 2027-01-04 kommer att upphöra om 60 dagar.\n\n\
+Kortets giltighetstid står angiven på framsidan av kortet men SITHS eID (certifikatet) kan ha ett annat datum, se ovan.\n\n\
+Har du SITHS reservkort eller SITHS konsultkort?\n\n\
+Om du ska förnya/förlänga SITHS reservkort, konsultkort eller SITHS eID (certifikat) på någon av dessa två korttyper, kontakta din korthandläggare på din arbetsplats.\n\n\
+Har du ett ordinarie SITHS-kort (med foto)?\n\n\
+Då ska du förnya ditt ordinarie SITHS-kort (med foto) genom att boka tid till ett av regionens tre ID-fotokontor. Mer information och bokning hittar du på regionens intranät: [HEMLIGHET/NYCKEL 1]\n\n\
+Observera att det tar cirka två veckor från att kortet har beställts av ID-fotokontoret tills du kan aktivera det.\n\n\
+Boka tid så snart som möjligt för fotografering.\n\n\
+Detta e-postmeddelande kan inte besvaras.\n\n\
+Vänliga hälsningar\n\
+[ORGANISATION A]\n\
+[ORGANISATION B]";
+
+        let (siths_findings, siths_scanned) = clf.scan_paragraphs_with_progress(siths, |_, _| {});
+        println!("SITHS ihopslagna block: {siths_scanned}, flaggade: {}", siths_findings.len());
+        for f in &siths_findings {
+            println!(
+                "  Block {}: {} ({}, {:.0}%) => {}",
+                f.paragraph_index,
+                f.category,
+                f.severity,
+                f.confidence * 100.0,
+                f.preview
+            );
+        }
+        assert!(
+            !siths_findings.is_empty() && siths_findings.iter().any(|f| f.severity == "high"),
+            "SITHS-meddelandet ska flaggas som hög känslighet under säkerhet/eID"
+        );
     }
 }

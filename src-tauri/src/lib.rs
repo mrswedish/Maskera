@@ -50,10 +50,10 @@ static RE_EMAIL: LazyLock<Regex> = LazyLock::new(|| {
 static RE_PHONE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?x)
-        (?:\+46|0046|0)
+        (?:(?:\+46)|\b(?:0046|0))
         [\s\-]?
         [1-9]\d{0,2}
-        (?:[\s\-]?\d{2,4}){2,4}
+        (?:[\s\-]?\d{2,4}){2,4}\b
         ",
     )
     .unwrap()
@@ -79,7 +79,11 @@ static RE_IPV4: LazyLock<Regex> = LazyLock::new(|| {
 static RE_CARD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b\d(?:[\s\-]?\d){12,18}\b").unwrap());
 
-// ── Tekniska hemligheter och nycklar (API-nycklar, tokens, PEM-nycklar) ───────
+/// Tjänstekortsnummer / SITHS-kortnummer / certifikatserienummer (16–22 sammanhängande siffror)
+static RE_SERVICE_CARD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b\d{16,22}\b").unwrap());
+
+// ── Tekniska hemligheter, nycklar, HSA-ID och interna intranätlänkar ─────────
 static RE_SECRETS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
         r"(?i:-----BEGIN\s+(?:[A-Z\s]+)?PRIVATE\s+KEY-----[\s\S]*?-----END\s+(?:[A-Z\s]+)?PRIVATE\s+KEY-----)",
@@ -88,9 +92,12 @@ static RE_SECRETS: LazyLock<Regex> = LazyLock::new(|| {
         r"|\b(?:xox[baprs]-[0-9a-zA-Z]{10,48})\b",
         r"|\b(?:AKIA[0-9A-Z]{16})\b",
         r"|\b(?:AIza[0-9A-Za-z-_]{35})\b",
-        r"|(?:bearer\s+eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,})",
-        r"|(?:(?:postgres|mysql|mongodb(?:\+srv)?):\/\/[^\s:@/]+:[^\s:@/]+@[^\s/]+)",
-        r#"|(?:(?:api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|password|lösenord)\s*[:=]\s*['"]?[A-Za-z0-9_\-.~!@#$%^&*()+=]{8,64}['"]?)"#
+        r"|(?:(?i:bearer)\s+eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,})",
+        r"|\beyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b",
+        r"|(?:(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis):\/\/[^\s:@/]+:[^\s:@/]+@[^\s/]+)",
+        r#"|(?:https?:\/\/(?:[a-zA-Z0-9-]+\.)*(?:intranat|intranet|internal|corp|lan|local)(?:\.[a-zA-Z0-9-]+)+(?::\d+)?(?:\/[^\s"'<>)]*)?)"#,
+        r"|\bSE\d{10}-[A-Za-z0-9]{3,15}\b",
+        r#"|(?:(?i:api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|password|lösenord)\s*[:=]\s*['"]?[A-Za-z0-9_\-.~!@#$%^&*()+=]{8,64}['"]?)"#
     ))
     .unwrap()
 });
@@ -447,21 +454,41 @@ async fn classify_document(
     unmasked_pii_count: usize,
     secret_count: usize,
     unmasked_secret_count: usize,
+    cached_findings: Option<Vec<ParagraphFinding>>,
+    cached_paragraphs_scanned: Option<usize>,
+    cached_duration_ms: Option<u64>,
+    app: AppHandle,
 ) -> Result<ClassificationReport, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<ClassificationReport, String> {
-        let findings: Vec<ParagraphFinding> = if let Some(clf) = CLASSIFIER.get() {
-            clf.scan_paragraphs(&masked_text)
-        } else {
-            Vec::new()
-        };
-
         let semantic_available = CLASSIFIER.get().is_some();
+
+        let (findings, paragraphs_scanned, scan_duration_ms) =
+            if let Some(existing) = cached_findings {
+                (
+                    existing,
+                    cached_paragraphs_scanned.unwrap_or(0),
+                    cached_duration_ms.unwrap_or(0),
+                )
+            } else if let Some(clf) = CLASSIFIER.get() {
+                let t0 = std::time::Instant::now();
+                let (found, total_paras) =
+                    clf.scan_paragraphs_with_progress(&masked_text, |chunk, total| {
+                        let _ = app.emit("gemma_scan_progress", NerProgress { chunk, total });
+                    });
+                let ms = t0.elapsed().as_millis() as u64;
+                (found, total_paras, ms)
+            } else {
+                (Vec::new(), 0, 0)
+            };
+
         Ok(build_report(
             active_pii_count,
             unmasked_pii_count,
             secret_count,
             unmasked_secret_count,
             semantic_available,
+            paragraphs_scanned,
+            scan_duration_ms,
             findings,
         ))
     })
@@ -784,8 +811,20 @@ fn run_regex(text: &str, requested: &[String]) -> Vec<Match> {
         }
     }
 
-    // ── Kreditkortsnummer (med Luhn-validering) ──
+    // ── Kreditkortsnummer (med Luhn-validering) samt tjänstekort/SITHS-kort (16–22 siffror) ──
     if has("Kortnummer") {
+        for m in RE_SERVICE_CARD.find_iter(text) {
+            if overlaps_any(&matches, m.start(), m.end()) {
+                continue;
+            }
+            matches.push(Match {
+                text: m.as_str().to_string(),
+                label: "Kortnummer".to_string(),
+                start: m.start(),
+                end: m.end(),
+                source: "regex".to_string(),
+            });
+        }
         for m in RE_CARD.find_iter(text) {
             let s = m.as_str();
             if !luhn_valid(s) || overlaps_any(&matches, m.start(), m.end()) {
@@ -872,6 +911,17 @@ mod tests {
         assert_eq!(res.len(), 2);
         assert_eq!(res[0].label, "Hemlighet/Nyckel");
         assert_eq!(res[1].label, "Hemlighet/Nyckel");
+    }
+
+    #[test]
+    fn detects_siths_card_and_intranet_url() {
+        let text = "Ditt SITHS-kort nr. 9752267235710527661 förnyas via https://intranat.rjl.se/service-och-stod-i-arbetet/bestalla/?pageId=49904";
+        let res = run_regex(text, &all_regex_labels());
+        assert_eq!(res.len(), 2);
+        assert_eq!(res[0].label, "Kortnummer");
+        assert_eq!(res[0].text, "9752267235710527661");
+        assert_eq!(res[1].label, "Hemlighet/Nyckel");
+        assert!(res[1].text.starts_with("https://intranat.rjl.se/"));
     }
 
     #[test]

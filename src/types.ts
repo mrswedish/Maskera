@@ -43,5 +43,7 @@ export interface ClassificationReport {
   unmasked_pii_count: number;
   secret_count: number;
   semantic_available: boolean;
+  paragraphs_scanned: number;
+  scan_duration_ms: number;
   findings: ParagraphFinding[];
 }
