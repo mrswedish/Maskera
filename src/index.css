@@ -737,7 +737,8 @@ body {
 .gatekeeper-findings-summary {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  flex-wrap: wrap;
+  gap: 0.45rem;
   font-weight: 600;
   cursor: pointer;
   list-style: none;
@@ -746,6 +747,39 @@ body {
 
 .gatekeeper-findings-summary::-webkit-details-marker {
   display: none;
+}
+
+.summary-sev-pills {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+/* Nivåbricka (WCAG 1.4.1: ikon + text + ram + färg, ej enbart färg) */
+.sev-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  border-radius: 9999px;
+  padding: 0.08rem 0.45rem;
+  font-size: 0.69rem;
+  font-weight: 700;
+  line-height: 1.3;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+
+.sev-pill.high {
+  background: light-dark(#fee2e2, rgba(239, 68, 68, 0.24));
+  color: light-dark(#991b1b, #fecaca);
+  border-color: light-dark(#dc2626, #f87171);
+}
+
+.sev-pill.medium {
+  background: light-dark(#fef3c7, rgba(245, 158, 11, 0.24));
+  color: light-dark(#78350f, #fde68a);
+  border-color: light-dark(#b45309, #fbbf24);
 }
 
 .details-chevron {
@@ -767,11 +801,18 @@ body {
   margin: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.3rem;
 }
 
 .finding-item {
   margin: 0;
+  border-left: 3px solid #dc2626;
+  padding-left: 0.35rem;
+  border-radius: 3px;
+}
+
+.finding-item.medium {
+  border-left-color: #d97706;
 }
 
 .finding-item-row {
@@ -784,10 +825,11 @@ body {
   flex: 1;
   min-width: 0;
   display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem;
   line-height: 1.35;
-  padding: 0.28rem 0.45rem;
+  padding: 0.26rem 0.45rem;
   border-radius: 5px;
   background: transparent;
   border: 1px solid transparent;
@@ -798,9 +840,11 @@ body {
   transition: background-color 0.15s ease, border-color 0.15s ease;
 }
 
-.finding-item-btn:hover {
-  background: light-dark(rgba(15, 23, 42, 0.06), rgba(255, 255, 255, 0.08));
-  border-color: var(--border-subtle);
+@media (hover: hover) {
+  .finding-item-btn:hover {
+    background: light-dark(rgba(15, 23, 42, 0.06), rgba(255, 255, 255, 0.08));
+    border-color: var(--border-subtle);
+  }
 }
 
 .finding-dismiss-btn {
@@ -819,14 +863,20 @@ body {
   min-block-size: 24px;
 }
 
-.finding-dismiss-btn:hover {
-  background: light-dark(#d1fae5, rgba(16, 185, 129, 0.28));
+@media (hover: hover) {
+  .finding-dismiss-btn:hover {
+    background: light-dark(#d1fae5, rgba(16, 185, 129, 0.28));
+  }
 }
 
 .finding-category {
   font-weight: 700;
   color: light-dark(#991b1b, #fca5a5);
   white-space: nowrap;
+}
+
+.finding-item.medium .finding-category {
+  color: light-dark(#78350f, #fcd34d);
 }
 
 .finding-confidence {
@@ -1167,6 +1217,12 @@ body {
   color: light-dark(#991b1b, #fecaca);
 }
 
+.para-toggle-btn.only-medium[aria-pressed="true"] {
+  background: light-dark(#fef3c7, rgba(245, 158, 11, 0.2));
+  border-color: light-dark(#b45309, #fbbf24);
+  color: light-dark(#78350f, #fde68a);
+}
+
 /* ── Markerade känsliga stycken i granskningsvyn (Lager 3) ── */
 .flagged-para-block {
   margin: 0.6rem 0;
@@ -1191,34 +1247,49 @@ body {
 
 .flagged-para-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  padding: 0.35rem 0.7rem;
-  background: light-dark(#fee2e2, rgba(15, 23, 42, 0.7));
-  border-bottom: 1px solid light-dark(rgba(220, 38, 38, 0.2), rgba(255, 255, 255, 0.08));
+  flex-direction: column;
+  gap: 0.28rem;
+  padding: 0.45rem 0.75rem;
+  background: light-dark(#fee2e2, rgba(15, 23, 42, 0.72));
+  border-bottom: 1px solid light-dark(rgba(220, 38, 38, 0.22), rgba(255, 255, 255, 0.08));
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  font-size: 0.75rem;
-  line-height: 1.35;
+  font-size: 0.76rem;
+  line-height: 1.4;
   white-space: normal;
 }
 
 .flagged-para-block.severity-medium .flagged-para-header {
-  background: light-dark(#fef3c7, rgba(15, 23, 42, 0.7));
+  background: light-dark(#fef3c7, rgba(15, 23, 42, 0.72));
   border-bottom-color: light-dark(rgba(217, 119, 6, 0.25), rgba(255, 255, 255, 0.08));
+}
+
+.flagged-para-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
 }
 
 .flagged-para-title {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
+  flex-wrap: wrap;
+  gap: 0.45rem;
   font-weight: 700;
   color: light-dark(#7f1d1d, #fca5a5);
 }
 
 .flagged-para-block.severity-medium .flagged-para-title {
   color: light-dark(#78350f, #fcd34d);
+}
+
+.flagged-para-explain {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 400;
+  line-height: 1.42;
+  color: var(--text-primary);
 }
 
 .flagged-para-meta {

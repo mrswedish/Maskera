@@ -1491,39 +1491,72 @@ export default function App() {
           }`}
         >
           <div className="flagged-para-header">
-            <span
-              className="flagged-para-title"
-              title={`${f.reason} (${Math.round(f.confidence * 100)}% samstämmighet)`}
-            >
-              <AlertTriangle size={13} aria-hidden="true" />
-              <span>{f.category}</span>
-            </span>
-            <span className="flagged-para-meta">
-              <button
-                type="button"
-                className="flagged-action-btn"
-                onClick={() =>
-                  setEditingSlice({
-                    start: fStart,
-                    end: fEnd,
-                    draft: sourceText.slice(fStart, fEnd),
-                  })
-                }
-                title="Redigera detta avsnitt direkt på plats"
-              >
-                <Pencil size={12} aria-hidden="true" />
-                <span>Redigera</span>
-              </button>
-              <button
-                type="button"
-                className="flagged-action-btn approve"
-                onClick={() => toggleDismissFinding(f.paragraph_index)}
-                title="Markera att du har granskat detta avsnitt och bedömer det säkert att dela"
-              >
-                <Check size={12} aria-hidden="true" />
-                <span>Klarmarkera</span>
-              </button>
-            </span>
+            <div className="flagged-para-top-row">
+              <span className="flagged-para-title">
+                <span className={`sev-pill ${f.severity}`}>
+                  {f.severity === "high" ? (
+                    <XCircle size={12} aria-hidden="true" />
+                  ) : (
+                    <AlertTriangle size={12} aria-hidden="true" />
+                  )}
+                  <span>
+                    {f.severity === "high" ? "Hög känslighet" : "Gränsfall"}
+                  </span>
+                </span>
+                <span>
+                  Avsnitt {f.paragraph_index} · {f.category}
+                </span>
+              </span>
+              <span className="flagged-para-meta">
+                <button
+                  type="button"
+                  className="flagged-action-btn"
+                  onClick={() =>
+                    setEditingSlice({
+                      start: fStart,
+                      end: fEnd,
+                      draft: sourceText.slice(fStart, fEnd),
+                    })
+                  }
+                  title="Redigera detta avsnitt direkt på plats"
+                >
+                  <Pencil size={12} aria-hidden="true" />
+                  <span>
+                    Redigera
+                    <span className="visually-hidden">
+                      {" "}
+                      avsnitt {f.paragraph_index}
+                    </span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="flagged-action-btn approve"
+                  onClick={() => toggleDismissFinding(f.paragraph_index)}
+                  title="Markera att du har granskat detta avsnitt och bedömer det säkert att dela"
+                >
+                  <Check size={12} aria-hidden="true" />
+                  <span>
+                    Klarmarkera
+                    <span className="visually-hidden">
+                      {" "}
+                      avsnitt {f.paragraph_index}
+                    </span>
+                  </span>
+                </button>
+              </span>
+            </div>
+            <p className="flagged-para-explain">
+              <strong>
+                {f.severity === "high"
+                  ? `Röd (${Math.round(f.confidence * 100)}% träffstyrka): `
+                  : `Gul (${Math.round(f.confidence * 100)}% träffstyrka): `}
+              </strong>
+              {f.reason}{" "}
+              {f.severity === "high"
+                ? "Stark koppling — kontrollera att inga känsliga sakdetaljer röjs, eller klarmarkera efter granskning."
+                : "Svagare gränsfallsträff — ögna igenom och klarmarkera om innehållet är ofarligt."}
+            </p>
           </div>
           <div className="flagged-para-body">
             {isEditingWholeFlagged && editingSlice ? (
@@ -1681,6 +1714,11 @@ export default function App() {
   ]
     .filter(Boolean)
     .join(" · ");
+
+  const highFindingsCount =
+    report?.findings.filter((f) => f.severity === "high").length ?? 0;
+  const medFindingsCount =
+    (report?.findings.length ?? 0) - highFindingsCount;
 
   return (
     <div className="maskera-root">
@@ -2052,9 +2090,22 @@ export default function App() {
               {report?.findings && report.findings.length > 0 && (
                 <details className="gatekeeper-findings-details">
                   <summary className="gatekeeper-findings-summary">
-                    <AlertTriangle size={13} aria-hidden="true" />
                     <span>
                       Visa {report.findings.length} flaggade avsnitt i listvy
+                    </span>
+                    <span className="summary-sev-pills">
+                      {highFindingsCount > 0 && (
+                        <span className="sev-pill high">
+                          <XCircle size={11} aria-hidden="true" />
+                          <span>{highFindingsCount} röd · Hög känslighet</span>
+                        </span>
+                      )}
+                      {medFindingsCount > 0 && (
+                        <span className="sev-pill medium">
+                          <AlertTriangle size={11} aria-hidden="true" />
+                          <span>{medFindingsCount} gul · Gränsfall</span>
+                        </span>
+                      )}
                     </span>
                     <ChevronDown size={14} aria-hidden="true" className="details-chevron" />
                   </summary>
@@ -2066,7 +2117,20 @@ export default function App() {
                             type="button"
                             className="finding-item-btn"
                             onClick={() => handleJumpToParagraph(f.paragraph_index)}
+                            title={f.reason}
                           >
+                            <span className={`sev-pill ${f.severity}`}>
+                              {f.severity === "high" ? (
+                                <XCircle size={11} aria-hidden="true" />
+                              ) : (
+                                <AlertTriangle size={11} aria-hidden="true" />
+                              )}
+                              <span>
+                                {f.severity === "high"
+                                  ? "Hög känslighet"
+                                  : "Gränsfall"}
+                              </span>
+                            </span>
                             <span className="finding-category">
                               Avsnitt {f.paragraph_index} · {f.category}
                             </span>
@@ -2080,7 +2144,13 @@ export default function App() {
                             title="Jag har granskat detta avsnitt och bedömer det säkert efter maskering"
                           >
                             <Check size={12} aria-hidden="true" />
-                            <span>Klarmarkera</span>
+                            <span>
+                              Klarmarkera
+                              <span className="visually-hidden">
+                                {" "}
+                                avsnitt {f.paragraph_index}
+                              </span>
+                            </span>
                           </button>
                         </div>
                       </li>
@@ -2287,7 +2357,9 @@ export default function App() {
                     {charFindings.length > 0 && !isEditing && (
                       <button
                         type="button"
-                        className="tb-preset-btn para-toggle-btn"
+                        className={`tb-preset-btn para-toggle-btn ${
+                          highFindingsCount > 0 ? "has-high" : "only-medium"
+                        }`}
                         aria-pressed={showParaHighlights}
                         onClick={() => setShowParaHighlights((v) => !v)}
                         title="Visa eller dölj utmärkning av känsliga avsnitt i texten"

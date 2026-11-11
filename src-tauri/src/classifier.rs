@@ -94,7 +94,7 @@ const PROTOTYPE_GROUPS: &[PrototypeGroup] = &[
         category: "Säkerhet, IT-arkitektur & Intern kod",
         axis: "säkerhet",
         severity: "high",
-        reason: "Berör konkret IT-sårbarhet, penetrationstest, brandväggs-/nätverkskonfiguration, hemlig arkitektur eller proprietär källkod.",
+        reason: "Berör intern IT-miljö, server-/systemarkitektur, behörigheter, sårbarheter eller intern systemlogik.",
         prompts: &[
             "Teknisk sårbarhetsrapport, exploatering, SQL-injektion, penetrationstest, brandväggsregler, intern nätverkstopologi eller aktivt dataintrång.",
             "Proprietär intern källkod, hemliga produktionsnycklar, krypteringsnycklar, autentiseringsbugg eller oskyddad databasendpoint i produktionsmiljö.",
@@ -131,6 +131,8 @@ const NEUTRAL_PROMPTS: &[&str] = &[
     "Minnesanteckningar från arbetsplatsträff, mötesprotokoll, dagordning, enhet, datum och tid, plats, närvarande medarbetare, mötesledare och sekreterare.",
     "Allmänt verksamhetsläge och bemanning inför jul, nyår och semester, beläggning i telefonrådgivning, tillgänglighetsmål, täckning av sjuksköterskepass och läkarpass samt julschema och hyrpersonal.",
     "Allmänna mötespunkter på vårdcentral, skola, kommun eller kontor om schemaläggning, lokaler, trivsel, allmänna rutiner och planering utan enskilda patientuppgifter eller säkerhetssårbarheter.",
+    "Viktig information: Detta e-postmeddelande kommer från en extern avsändare utanför organisationen. Klicka aldrig på länkar och öppna aldrig bifogade filer om du är osäker på avsändaren eller innehållet. Vid misstanke om skadligt mejl eller nätfiske, vidarebefordra meddelandet.",
+    "Automatisk e-postfotnot, signatur eller konfidentialitetsnotis längst ned i ett vanligt e-postmeddelande i Outlook eller Teams.",
 ];
 
 struct EmbeddedPrototype {
@@ -709,10 +711,15 @@ pub fn build_report(
     // Skilj på generella eID-/kortrutiner (där faran ligger i kortnummer, HSA-ID och intranätlänk
     // som maskeras bort av Lager 1/2) och sakligt känslig kontext (GDPR Art. 9–10 hälsa/brott,
     // opublicerade affärssiffror/M&A eller konkreta IT-sårbarheter).
-    let substantive_context_count = findings
+    let substantive_high_count = findings
         .iter()
-        .filter(|f| f.category != "Tjänstekort, eID, Behörighet & Intranät")
+        .filter(|f| f.category != "Tjänstekort, eID, Behörighet & Intranät" && f.severity == "high")
         .count();
+    let substantive_med_count = findings
+        .iter()
+        .filter(|f| f.category != "Tjänstekort, eID, Behörighet & Intranät" && f.severity != "high")
+        .count();
+    let substantive_context_count = substantive_high_count + substantive_med_count;
 
     // 1. Bedömning av ORIGINALTEXTEN (före maskering)
     let (verdict_before_mask, summary_before) = if secret_count > 0 || has_high_semantic {
@@ -767,11 +774,25 @@ pub fn build_report(
             ),
         )
     } else if substantive_context_count > 0 {
+        let red_lbl = if substantive_high_count == 1 {
+            "1 rött avsnitt (stark träff)".to_string()
+        } else {
+            format!("{substantive_high_count} röda avsnitt (starka träffar)")
+        };
+        let yellow_lbl = if substantive_med_count == 1 {
+            "1 gult avsnitt (gränsfall)".to_string()
+        } else {
+            format!("{substantive_med_count} gula avsnitt (gränsfall)")
+        };
+        let breakdown = match (substantive_high_count, substantive_med_count) {
+            (h, m) if h > 0 && m > 0 => format!("{red_lbl} och {yellow_lbl}"),
+            (h, _) if h > 0 => red_lbl,
+            _ => yellow_lbl,
+        };
         (
             "caution_after_mask".to_string(),
             format!(
-                "Granska före delning: Direkta namn och identifierare är maskerade, men {} avsnitt innehåller sakuppgifter (t.ex. vård/hälsa, affärssiffror eller sårbarhetsdetaljer) som kan innebära bakvägsidentifiering eller företagssekretess. Kontrollera avsnitten nedan eller klarmarkera dem när du har granskat.",
-                substantive_context_count
+                "Namn och identifierare är maskerade, men texten har {breakdown}. Kontrollera att inga känsliga sakdetaljer röjs, eller klarmarkera efter granskning."
             ),
         )
     } else if has_any_semantic {
@@ -958,6 +979,19 @@ Beläggningen och trycket i telefonrådgivningen ligger [ÖVRIGT A] högre än m
             apt_findings.len(),
             0,
             "APT-rubriken och bemanningsavsnittet får INTE falskflaggas som säkerhetskänsliga!"
+        );
+
+        // Standardiserad Outlook-/Exchange-varningsbanner för extern e-post ska inte falskflaggas:
+        let ext_banner = "\
+ToDi för transkribering\n\n\
+Viktig Information: Detta e-postmeddelande kommer från en avsändare utanför [PLATS A]. Klicka aldrig på länkar och öppna aldrig bifogade filer om du är osäker på avsändaren eller innehållet.\n\n\
+Om du misstänker att meddelandet är skadligt, vidarebefordra meddelandet till [E-POST 3]";
+        let (banner_findings, _) =
+            clf.scan_paragraphs_with_progress(ext_banner, ext_banner, |_, _| {});
+        assert_eq!(
+            banner_findings.len(),
+            0,
+            "Automatisk varningsfot för extern e-post ska inte falskflaggas som IT-sårbarhet!"
         );
     }
 }
