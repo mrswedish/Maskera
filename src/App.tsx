@@ -20,6 +20,7 @@ import {
   Sun,
   Moon,
   Monitor,
+  Pencil,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -38,6 +39,13 @@ import {
   buildMaskedText,
   unmaskText,
 } from "./translationUtils";
+import {
+  reconcileMatchesAfterEdit,
+  renderInlineFormattedText,
+  renderFormattedMarkdown,
+  markdownToCleanHtml,
+  markdownToCleanPlainText,
+} from "./markdownUtils";
 
 const REGEX_LABELS = [
   "Personnummer",
@@ -257,8 +265,20 @@ export default function App() {
 
   // AI-gatekeeper (EmbeddingGemma 2 + Secret regex)
   const [report, setReport] = useState<ClassificationReport | null>(null);
+  const [rawSemanticFindings, setRawSemanticFindings] = useState<
+    ParagraphFinding[]
+  >([]);
+  const [dismissedFindings, setDismissedFindings] = useState<Set<number>>(
+    new Set()
+  );
   const [showParaHighlights, setShowParaHighlights] = useState(true);
   const [focusedParaIndex, setFocusedParaIndex] = useState<number | null>(null);
+  const [textEditedSinceScan, setTextEditedSinceScan] = useState(false);
+  const [editingSlice, setEditingSlice] = useState<{
+    start: number;
+    end: number;
+    draft: string;
+  } | null>(null);
   const [gemmaInstalled, setGemmaInstalled] = useState(false);
   const [gemmaLoading, setGemmaLoading] = useState(false);
   const [gemmaReady, setGemmaReady] = useState(false);
@@ -283,6 +303,7 @@ export default function App() {
 
   // Avmaskering
   const [aiResponseInput, setAiResponseInput] = useState("");
+  const [formattedUnmaskView, setFormattedUnmaskView] = useState(true);
   const [unmaskedResult, setUnmaskedResult] = useState<{
     text: string;
     replacements: number;
@@ -294,6 +315,8 @@ export default function App() {
   const copyTipMaskedRef = useRef<HTMLSpanElement>(null);
   const copyTipUnmaskedRef = useRef<HTMLSpanElement>(null);
   const lastCopyMsgRef = useRef<string>("");
+  const copyTimerMaskedRef = useRef<number | undefined>(undefined);
+  const copyTimerUnmaskedRef = useRef<number | undefined>(undefined);
 
   // Dra-och-släpp
   const [isDragOver, setIsDragOver] = useState(false);
@@ -488,29 +511,34 @@ export default function App() {
       origText: string,
       currMatches: Match[],
       currIgnored: Set<string>,
+      currDismissed: Set<number>,
       reuseCachedFindings: boolean
     ) => {
       if (!origText.trim()) {
         setReport(null);
+        setRawSemanticFindings([]);
         return;
       }
+
+      const isSecretOrCard = (label: string) =>
+        label === "Hemlighet/Nyckel" || label === "Kortnummer";
 
       const currActive = currMatches.filter((m) => !currIgnored.has(matchKey(m)));
       const currTable = buildTranslationTable(currActive);
       const currMasked = buildMaskedText(origText, currActive, currTable);
 
       const activePii = currActive.filter(
-        (m) => m.label !== "Hemlighet/Nyckel"
+        (m) => !isSecretOrCard(m.label)
       ).length;
       const unmaskedPii = currMatches
         .filter((m) => currIgnored.has(matchKey(m)))
-        .filter((m) => m.label !== "Hemlighet/Nyckel").length;
-      const totalSecrets = currMatches.filter(
-        (m) => m.label === "Hemlighet/Nyckel"
+        .filter((m) => !isSecretOrCard(m.label)).length;
+      const totalSecrets = currMatches.filter((m) =>
+        isSecretOrCard(m.label)
       ).length;
       const unmaskedSecrets = currMatches
         .filter((m) => currIgnored.has(matchKey(m)))
-        .filter((m) => m.label === "Hemlighet/Nyckel").length;
+        .filter((m) => isSecretOrCard(m.label)).length;
 
       const canReuse =
         reuseCachedFindings &&
@@ -522,6 +550,12 @@ export default function App() {
         setGemmaScanProgress(null);
       }
 
+      const cachedFiltered = canReuse
+        ? rawSemanticFindings.filter(
+            (f) => !currDismissed.has(f.paragraph_index)
+          )
+        : null;
+
       try {
         const rep = await invoke<ClassificationReport>("classify_document", {
           originalText: origText,
@@ -530,10 +564,13 @@ export default function App() {
           unmaskedPiiCount: unmaskedPii,
           secretCount: totalSecrets,
           unmaskedSecretCount: unmaskedSecrets,
-          cachedFindings: canReuse ? report.findings : null,
+          cachedFindings: cachedFiltered,
           cachedParagraphsScanned: canReuse ? report.paragraphs_scanned : null,
           cachedDurationMs: canReuse ? report.scan_duration_ms : null,
         });
+        if (!canReuse) {
+          setRawSemanticFindings(rep.findings);
+        }
         setReport(rep);
       } catch (e) {
         console.error("Klassificeringsfel:", e);
@@ -544,20 +581,32 @@ export default function App() {
         }
       }
     },
-    [report, gemmaReady]
+    [report, rawSemanticFindings, gemmaReady]
   );
 
-  // Uppdatera trafikljus direkt (< 1 ms med cachade styckefynd) när användaren klickar på ord
+  // Uppdatera trafikljus direkt (< 1 ms med cachade styckefynd) när användaren klickar på ord eller klarmarkerar stycken
   useEffect(() => {
     if (!hasAnalyzed || !sourceText.trim()) return;
-    runSemanticClassification(sourceText, matches, ignoredKeys, true);
+    runSemanticClassification(
+      sourceText,
+      matches,
+      ignoredKeys,
+      dismissedFindings,
+      true
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ignoredKeys, matches]);
+  }, [ignoredKeys, matches, dismissedFindings]);
 
   // Om EmbeddingGemma 2 blir klar i bakgrunden efter att ett dokument redan analyserats, kör semantisk skanning
   useEffect(() => {
     if (gemmaReady && hasAnalyzed && sourceText.trim() && !report?.semantic_available) {
-      runSemanticClassification(sourceText, matches, ignoredKeys, false);
+      runSemanticClassification(
+        sourceText,
+        matches,
+        ignoredKeys,
+        dismissedFindings,
+        false
+      );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gemmaReady]);
@@ -590,6 +639,39 @@ export default function App() {
     );
   };
 
+  // Sömlös redigering av källtext som bevarar alla befintliga maskeringar genom offset-justering
+  const handleSourceTextEdit = useCallback(
+    (nextText: string) => {
+      if (nextText === sourceText) return;
+      const reconciled = reconcileMatchesAfterEdit(
+        sourceText,
+        nextText,
+        matches,
+        ignoredKeys
+      );
+      setSourceText(nextText);
+      setMatches(reconciled.matches);
+      setIgnoredKeys(reconciled.ignoredKeys);
+      if (hasAnalyzed) {
+        setTextEditedSinceScan(true);
+      }
+    },
+    [sourceText, matches, ignoredKeys, hasAnalyzed]
+  );
+
+  // Klarmarkera / godkänn ett granskat avsnitt från EmbeddingGemma 2
+  const toggleDismissFinding = useCallback((paraIndex: number) => {
+    setDismissedFindings((prev) => {
+      const next = new Set(prev);
+      if (next.has(paraIndex)) {
+        next.delete(paraIndex);
+      } else {
+        next.add(paraIndex);
+      }
+      return next;
+    });
+  }, []);
+
   // Klistra in från urklipp
   const handlePasteClipboard = async () => {
     try {
@@ -601,8 +683,12 @@ export default function App() {
       setOriginalDocxBytes(null);
       setOriginalXlsxBytes(null);
       setIsEditing(true);
+      setEditingSlice(null);
       setHasAnalyzed(false);
+      setTextEditedSinceScan(false);
       setReport(null);
+      setRawSemanticFindings([]);
+      setDismissedFindings(new Set());
       setMatches([]);
       setIgnoredKeys(new Set());
       setLastDurationMs(null);
@@ -627,8 +713,12 @@ export default function App() {
       setOriginalDocxBytes(imported.can_export_docx ? byteArr : null);
       setOriginalXlsxBytes(imported.can_export_xlsx ? byteArr : null);
       setIsEditing(true);
+      setEditingSlice(null);
       setHasAnalyzed(false);
+      setTextEditedSinceScan(false);
       setReport(null);
+      setRawSemanticFindings([]);
+      setDismissedFindings(new Set());
       setMatches([]);
       setIgnoredKeys(new Set());
       setLastDurationMs(null);
@@ -644,6 +734,7 @@ export default function App() {
     if (!sourceText.trim() || analyzing || classifying) return;
     setAnalyzing(true);
     setNerProgress(null);
+    setEditingSlice(null);
     const t0 = performance.now();
     try {
       const raw = await invoke<Match[]>("analyze_text", {
@@ -655,8 +746,11 @@ export default function App() {
         (a, b) => a.start - b.start
       );
       const emptyIgnored = new Set<string>();
+      const emptyDismissed = new Set<number>();
       setMatches(sorted);
       setIgnoredKeys(emptyIgnored);
+      setDismissedFindings(emptyDismissed);
+      setTextEditedSinceScan(false);
       setLastDurationMs(performance.now() - t0);
       setIsEditing(false);
       setHasAnalyzed(true);
@@ -664,7 +758,13 @@ export default function App() {
       setNerProgress(null);
 
       // Steg 2: Kör semantisk kontextanalys med EmbeddingGemma 2
-      await runSemanticClassification(sourceText, sorted, emptyIgnored, false);
+      await runSemanticClassification(
+        sourceText,
+        sorted,
+        emptyIgnored,
+        emptyDismissed,
+        false
+      );
     } catch (err) {
       alert("Fel vid analys: " + String(err));
       setAnalyzing(false);
@@ -722,36 +822,61 @@ export default function App() {
     setManualWord("");
   }, [manualWord, manualLabel, sourceText]);
 
-  // Kopiera maskerad text med Modern Web Guidance standard
+  // Kopiera maskerad text med Modern Web Guidance copy-button standard
   const handleCopyMasked = async () => {
     if (!maskedText) return;
     try {
       await navigator.clipboard.writeText(maskedText);
-      reportCopy(setCopyStatusMasked, true);
+      reportCopy(setCopyStatusMasked, copyTimerMaskedRef, true);
     } catch {
-      reportCopy(setCopyStatusMasked, false);
+      reportCopy(setCopyStatusMasked, copyTimerMaskedRef, false);
     }
   };
 
+  // Kopiera avmaskerat svar som både formaterad HTML (för Word/Outlook/Teams) och ren text
   const handleCopyUnmasked = async () => {
     if (!unmaskedResult.text) return;
     try {
-      await navigator.clipboard.writeText(unmaskedResult.text);
-      reportCopy(setCopyStatusUnmasked, true);
+      if (formattedUnmaskView && typeof ClipboardItem !== "undefined" && navigator.clipboard.write) {
+        const html = markdownToCleanHtml(unmaskedResult.text);
+        const plain = markdownToCleanPlainText(unmaskedResult.text);
+        const item = new ClipboardItem({
+          "text/html": new Blob([html], { type: "text/html" }),
+          "text/plain": new Blob([plain], { type: "text/plain" }),
+        });
+        await navigator.clipboard.write([item]);
+      } else {
+        await navigator.clipboard.writeText(unmaskedResult.text);
+      }
+      reportCopy(setCopyStatusUnmasked, copyTimerUnmaskedRef, true);
     } catch {
-      reportCopy(setCopyStatusUnmasked, false);
+      try {
+        await navigator.clipboard.writeText(
+          formattedUnmaskView
+            ? markdownToCleanPlainText(unmaskedResult.text)
+            : unmaskedResult.text
+        );
+        reportCopy(setCopyStatusUnmasked, copyTimerUnmaskedRef, true);
+      } catch {
+        reportCopy(setCopyStatusUnmasked, copyTimerUnmaskedRef, false);
+      }
     }
   };
 
   const reportCopy = (
     setter: React.Dispatch<React.SetStateAction<string>>,
+    timerRef: React.MutableRefObject<number | undefined>,
     ok: boolean
   ) => {
+    window.clearTimeout(timerRef.current);
     let msg = ok ? "Kopierad!" : "Kopiering misslyckades";
     if (msg === lastCopyMsgRef.current) msg += "\u00A0";
     lastCopyMsgRef.current = msg;
-    setter(msg);
-    setTimeout(() => {
+    setter("");
+    requestAnimationFrame(() => {
+      setter(msg);
+    });
+    timerRef.current = window.setTimeout(() => {
       setter("");
     }, 2200);
   };
@@ -923,32 +1048,49 @@ export default function App() {
     }, 2600);
   }, []);
 
-  // Hjälpfunktion för att rendera ett intervall [sliceStart, sliceEnd] av sourceText med dess ord-träffar
-  const renderSliceWithMatches = useCallback(
-    (sliceStart: number, sliceEnd: number, keyPrefix: string) => {
-      if (sliceEnd <= sliceStart) return null;
+  // Sparar en inline-redigerad delsträng [start..end] utan att tappa övriga maskeringar
+  const commitInlineSliceEdit = useCallback(() => {
+    if (!editingSlice) return;
+    const nextFull =
+      sourceText.slice(0, editingSlice.start) +
+      editingSlice.draft +
+      sourceText.slice(editingSlice.end);
+    handleSourceTextEdit(nextFull);
+    setEditingSlice(null);
+  }, [editingSlice, sourceText, handleSourceTextEdit]);
+
+  // Hjälpfunktion för att rendera inline-text + <mark>-chips inom [rangeStart, rangeEnd]
+  const renderInlineRangeWithMatches = useCallback(
+    (rangeStart: number, rangeEnd: number, keyPrefix: string) => {
+      if (rangeEnd <= rangeStart) return null;
       const sliceMatches = matches.filter(
-        (m) => m.end > sliceStart && m.start < sliceEnd
+        (m) => m.end > rangeStart && m.start < rangeEnd
       );
       if (sliceMatches.length === 0) {
         return (
           <span key={`${keyPrefix}-plain`}>
-            {sourceText.slice(sliceStart, sliceEnd)}
+            {renderInlineFormattedText(
+              sourceText.slice(rangeStart, rangeEnd),
+              `${keyPrefix}-fmt`
+            )}
           </span>
         );
       }
 
       const nodes: React.ReactNode[] = [];
-      let cursor = sliceStart;
+      let cursor = rangeStart;
 
       sliceMatches.forEach((m, idx) => {
-        const mStart = Math.max(m.start, sliceStart);
-        const mEnd = Math.min(m.end, sliceEnd);
+        const mStart = Math.max(m.start, rangeStart);
+        const mEnd = Math.min(m.end, rangeEnd);
 
         if (mStart > cursor) {
           nodes.push(
             <span key={`${keyPrefix}-t-${idx}`}>
-              {sourceText.slice(cursor, mStart)}
+              {renderInlineFormattedText(
+                sourceText.slice(cursor, mStart),
+                `${keyPrefix}-tf-${idx}`
+              )}
             </span>
           );
         }
@@ -974,6 +1116,7 @@ export default function App() {
               e.stopPropagation();
               toggleIgnored(key);
             }}
+            onDoubleClick={(e) => e.stopPropagation()}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault();
@@ -1001,10 +1144,13 @@ export default function App() {
         cursor = mEnd;
       });
 
-      if (cursor < sliceEnd) {
+      if (cursor < rangeEnd) {
         nodes.push(
           <span key={`${keyPrefix}-tail`}>
-            {sourceText.slice(cursor, sliceEnd)}
+            {renderInlineFormattedText(
+              sourceText.slice(cursor, rangeEnd),
+              `${keyPrefix}-tailf`
+            )}
           </span>
         );
       }
@@ -1014,11 +1160,321 @@ export default function App() {
     [sourceText, matches, ignoredKeys, activeTranslationTable, toggleIgnored]
   );
 
+  // Renderar en enskild rad [lineStart, lineEnd] med dokumenttypografi (rubrik, punktlista, brödtext)
+  const renderFormattedDocLine = useCallback(
+    (lineStart: number, lineEnd: number, keyPrefix: string) => {
+      const rawLine = sourceText.slice(lineStart, lineEnd);
+      if (!rawLine.trim()) {
+        return <div key={`${keyPrefix}-empty`} className="doc-empty-line" />;
+      }
+
+      // Markdown-rubrik (# .. ####) om ingen träff börjar inne i själva #-prefixet
+      const headingMatch = rawLine.match(/^(\s*#{1,4}\s+)/);
+      if (headingMatch) {
+        const prefixLen = headingMatch[1].length;
+        const level = headingMatch[1].trim().length;
+        const hasMatchInPrefix = matches.some(
+          (m) => m.start < lineStart + prefixLen && m.end > lineStart
+        );
+        if (!hasMatchInPrefix) {
+          return (
+            <div
+              key={`${keyPrefix}-h`}
+              className={`doc-heading doc-heading-${Math.min(level, 3)}`}
+            >
+              {renderInlineRangeWithMatches(
+                lineStart + prefixLen,
+                lineEnd,
+                `${keyPrefix}-hc`
+              )}
+            </div>
+          );
+        }
+      }
+
+      // Fristående fetstilt rubrikrad: **RUBRIK**
+      const trimmed = rawLine.trim();
+      if (
+        trimmed.startsWith("**") &&
+        trimmed.endsWith("**") &&
+        trimmed.length > 4 &&
+        !trimmed.slice(2, -2).includes("**")
+      ) {
+        const leadWs = rawLine.length - rawLine.trimStart().length;
+        const innerStart = lineStart + leadWs + 2;
+        const innerEnd = lineStart + leadWs + trimmed.length - 2;
+        const hasMatchAtEdges = matches.some(
+          (m) =>
+            (m.start < innerStart && m.end > lineStart) ||
+            (m.start < lineEnd && m.end > innerEnd)
+        );
+        if (!hasMatchAtEdges) {
+          return (
+            <div key={`${keyPrefix}-bh`} className="doc-heading doc-heading-2">
+              {renderInlineRangeWithMatches(
+                innerStart,
+                innerEnd,
+                `${keyPrefix}-bhc`
+              )}
+            </div>
+          );
+        }
+      }
+
+      // Punktlista (* / - / •)
+      const bulletMatch = rawLine.match(/^(\s*[-*•]\s+)/);
+      if (bulletMatch) {
+        const prefixLen = bulletMatch[1].length;
+        const hasMatchInPrefix = matches.some(
+          (m) => m.start < lineStart + prefixLen && m.end > lineStart
+        );
+        if (!hasMatchInPrefix) {
+          return (
+            <div key={`${keyPrefix}-li`} className="doc-bullet-item">
+              <span className="doc-bullet-dot" aria-hidden="true">
+                •
+              </span>
+              <span className="doc-bullet-content">
+                {renderInlineRangeWithMatches(
+                  lineStart + prefixLen,
+                  lineEnd,
+                  `${keyPrefix}-lic`
+                )}
+              </span>
+            </div>
+          );
+        }
+      }
+
+      return (
+        <div key={`${keyPrefix}-p`} className="doc-line">
+          {renderInlineRangeWithMatches(lineStart, lineEnd, `${keyPrefix}-lc`)}
+        </div>
+      );
+    },
+    [sourceText, matches, renderInlineRangeWithMatches]
+  );
+
+  // Renderar ett intervall [sliceStart, sliceEnd] uppdelat i dokumentstycken med direktredigering på plats
+  const renderSliceWithMatches = useCallback(
+    (
+      sliceStart: number,
+      sliceEnd: number,
+      keyPrefix: string,
+      insideFlaggedCard = false
+    ) => {
+      if (sliceEnd <= sliceStart) return null;
+
+      if (
+        insideFlaggedCard &&
+        editingSlice &&
+        editingSlice.start === sliceStart &&
+        editingSlice.end === sliceEnd
+      ) {
+        return (
+          <div className="inline-slice-editor" key={`${keyPrefix}-iedit`}>
+            <textarea
+              className="inline-slice-textarea"
+              value={editingSlice.draft}
+              rows={Math.max(3, editingSlice.draft.split("\n").length + 1)}
+              autoFocus
+              onChange={(e) =>
+                setEditingSlice((prev) =>
+                  prev ? { ...prev, draft: e.target.value } : null
+                )
+              }
+              onKeyDown={(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                  e.preventDefault();
+                  commitInlineSliceEdit();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  setEditingSlice(null);
+                }
+              }}
+            />
+            <div className="inline-slice-actions">
+              <span className="inline-slice-hint">
+                Övriga maskeringar i dokumentet bevaras automatiskt (Ctrl+Retur sparar)
+              </span>
+              <button
+                type="button"
+                className="tb-btn-subtle"
+                onClick={() => setEditingSlice(null)}
+              >
+                Avbryt
+              </button>
+              <button
+                type="button"
+                className="tb-btn-primary inline-save-btn"
+                onClick={commitInlineSliceEdit}
+              >
+                <Check size={14} aria-hidden="true" />
+                <span>Spara ändring</span>
+              </button>
+            </div>
+          </div>
+        );
+      }
+
+      // Dela upp i stycken längs tomrader (\n\n+) med exakta teckenpositioner
+      const blocks: Array<{ start: number; end: number }> = [];
+      let cursor = sliceStart;
+      while (cursor < sliceEnd) {
+        while (
+          cursor < sliceEnd &&
+          (sourceText[cursor] === "\n" || sourceText[cursor] === "\r")
+        ) {
+          cursor++;
+        }
+        if (cursor >= sliceEnd) break;
+        let bEnd = cursor;
+        while (bEnd < sliceEnd) {
+          if (
+            sourceText[bEnd] === "\n" &&
+            bEnd + 1 < sliceEnd &&
+            sourceText[bEnd + 1] === "\n"
+          ) {
+            break;
+          }
+          bEnd++;
+        }
+        blocks.push({ start: cursor, end: bEnd });
+        cursor = bEnd;
+      }
+
+      return blocks.map((blk, bIdx) => {
+        const isEditingThisBlock =
+          !insideFlaggedCard &&
+          editingSlice !== null &&
+          editingSlice.start === blk.start &&
+          editingSlice.end === blk.end;
+
+        if (isEditingThisBlock && editingSlice) {
+          return (
+            <div
+              key={`${keyPrefix}-blk-edit-${bIdx}`}
+              className="inline-slice-editor"
+            >
+              <textarea
+                className="inline-slice-textarea"
+                value={editingSlice.draft}
+                rows={Math.max(2, editingSlice.draft.split("\n").length + 1)}
+                autoFocus
+                onChange={(e) =>
+                  setEditingSlice((prev) =>
+                    prev ? { ...prev, draft: e.target.value } : null
+                  )
+                }
+                onKeyDown={(e) => {
+                  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                    e.preventDefault();
+                    commitInlineSliceEdit();
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    setEditingSlice(null);
+                  }
+                }}
+              />
+              <div className="inline-slice-actions">
+                <span className="inline-slice-hint">
+                  Övriga maskeringar bevaras (Ctrl+Retur sparar)
+                </span>
+                <button
+                  type="button"
+                  className="tb-btn-subtle"
+                  onClick={() => setEditingSlice(null)}
+                >
+                  Avbryt
+                </button>
+                <button
+                  type="button"
+                  className="tb-btn-primary inline-save-btn"
+                  onClick={commitInlineSliceEdit}
+                >
+                  <Check size={14} aria-hidden="true" />
+                  <span>Spara ändring</span>
+                </button>
+              </div>
+            </div>
+          );
+        }
+
+        // Dela upp blocket i rader med exakta teckenpositioner
+        const lines: React.ReactNode[] = [];
+        let lStart = blk.start;
+        let lIdx = 0;
+        while (lStart <= blk.end) {
+          let lEnd = sourceText.indexOf("\n", lStart);
+          if (lEnd === -1 || lEnd > blk.end) {
+            lEnd = blk.end;
+          }
+          lines.push(
+            renderFormattedDocLine(
+              lStart,
+              lEnd,
+              `${keyPrefix}-b${bIdx}-l${lIdx++}`
+            )
+          );
+          if (lEnd === blk.end) break;
+          lStart = lEnd + 1;
+        }
+
+        if (insideFlaggedCard) {
+          return (
+            <div key={`${keyPrefix}-blk-${bIdx}`} className="doc-para">
+              {lines}
+            </div>
+          );
+        }
+
+        return (
+          <div
+            key={`${keyPrefix}-blk-${bIdx}`}
+            className="doc-para doc-para-editable"
+            onDoubleClick={() =>
+              setEditingSlice({
+                start: blk.start,
+                end: blk.end,
+                draft: sourceText.slice(blk.start, blk.end),
+              })
+            }
+            title="Dubbelklicka för att redigera detta stycke direkt utan att tappa maskeringar"
+          >
+            {lines}
+            <button
+              type="button"
+              className="para-inline-edit-btn"
+              onClick={() =>
+                setEditingSlice({
+                  start: blk.start,
+                  end: blk.end,
+                  draft: sourceText.slice(blk.start, blk.end),
+                })
+              }
+              aria-label="Redigera stycke"
+              title="Redigera detta stycke på plats"
+            >
+              <Pencil size={12} aria-hidden="true" />
+              <span>Redigera</span>
+            </button>
+          </div>
+        );
+      });
+    },
+    [
+      sourceText,
+      editingSlice,
+      commitInlineSliceEdit,
+      renderFormattedDocLine,
+    ]
+  );
+
   // Highlight-rendering i läsläge (kombinerar Lager 3-styckemarkeringar och Lager 1/2-ordmarkeringar)
   const renderedReviewText = useMemo(() => {
     if (!sourceText) return null;
     if (!showParaHighlights || charFindings.length === 0) {
-      return renderSliceWithMatches(0, sourceText.length, "full");
+      return renderSliceWithMatches(0, sourceText.length, "full", false);
     }
 
     const elements: React.ReactNode[] = [];
@@ -1031,7 +1487,7 @@ export default function App() {
 
       if (fStart > paraCursor) {
         elements.push(
-          renderSliceWithMatches(paraCursor, fStart, `before-p-${idx}`)
+          renderSliceWithMatches(paraCursor, fStart, `before-p-${idx}`, false)
         );
       }
 
@@ -1057,10 +1513,34 @@ export default function App() {
                 {Math.round(f.confidence * 100)}% träffsäkerhet
               </span>
               <span className="flagged-para-reason">{f.reason}</span>
+              <button
+                type="button"
+                className="flagged-action-btn"
+                onClick={() =>
+                  setEditingSlice({
+                    start: fStart,
+                    end: fEnd,
+                    draft: sourceText.slice(fStart, fEnd),
+                  })
+                }
+                title="Redigera detta avsnitt direkt på plats"
+              >
+                <Pencil size={12} aria-hidden="true" />
+                <span>Redigera</span>
+              </button>
+              <button
+                type="button"
+                className="flagged-action-btn approve"
+                onClick={() => toggleDismissFinding(f.paragraph_index)}
+                title="Markera att du har granskat detta avsnitt och bedömer det säkert att dela"
+              >
+                <Check size={12} aria-hidden="true" />
+                <span>Klarmarkera</span>
+              </button>
             </span>
           </div>
           <div className="flagged-para-body">
-            {renderSliceWithMatches(fStart, fEnd, `in-p-${idx}`)}
+            {renderSliceWithMatches(fStart, fEnd, `in-p-${idx}`, true)}
           </div>
         </div>
       );
@@ -1070,7 +1550,12 @@ export default function App() {
 
     if (paraCursor < sourceText.length) {
       elements.push(
-        renderSliceWithMatches(paraCursor, sourceText.length, "after-all")
+        renderSliceWithMatches(
+          paraCursor,
+          sourceText.length,
+          "after-all",
+          false
+        )
       );
     }
 
@@ -1081,6 +1566,7 @@ export default function App() {
     charFindings,
     focusedParaIndex,
     renderSliceWithMatches,
+    toggleDismissFinding,
   ]);
 
   // Traffic light helpers
@@ -1314,17 +1800,21 @@ export default function App() {
             </span>
           </button>
 
-          {/* Kopiera maskerad text med Modern Web Guidance live-region */}
+          {/* Kopiera maskerad text med Modern Web Guidance copy-button standard */}
           <span className="copy-wrapper">
             <button
               type="button"
               className="tb-btn-copy"
               onClick={handleCopyMasked}
               disabled={!sourceText}
-              aria-label="Kopiera maskerad text till urklipp"
+              data-copied={copyStatusMasked.startsWith("Kopierad") ? "" : undefined}
               title="Kopiera maskerad text (redo att klistras in i AI)"
             >
-              <Copy size={15} aria-hidden="true" />
+              {copyStatusMasked.startsWith("Kopierad") ? (
+                <Check size={15} aria-hidden="true" />
+              ) : (
+                <Copy size={15} aria-hidden="true" />
+              )}
               <span>Kopiera maskerad</span>
             </button>
             <span
@@ -1543,6 +2033,16 @@ export default function App() {
                   <span className="before-status">
                     Före maskering: <em>{beforeBadge.text}</em>
                   </span>
+                  {dismissedFindings.size > 0 && (
+                    <button
+                      type="button"
+                      className="tb-btn-subtle"
+                      onClick={() => setDismissedFindings(new Set())}
+                      title="Visa alla klarmarkerade avsnitt igen"
+                    >
+                      Återställ {dismissedFindings.size} klarmarkerade
+                    </button>
+                  )}
                   {lastDurationMs !== null && (
                     <span className="latency-tag">
                       BERT + Regex: {Math.round(lastDurationMs)} ms
@@ -1563,29 +2063,40 @@ export default function App() {
               {report?.findings && report.findings.length > 0 && (
                 <div className="gatekeeper-findings">
                   <div className="findings-title">
-                    <AlertTriangle size={14} />
+                    <AlertTriangle size={14} aria-hidden="true" />
                     <span>
                       Flaggade avsnitt från EmbeddingGemma 2 ({report.findings.length}{" "}
-                      st med känslig kontext):
+                      st att granska):
                     </span>
                   </div>
                   <ul className="findings-list" role="list">
                     {report.findings.map((f, i) => (
                       <li key={i} className={`finding-item ${f.severity}`}>
-                        <button
-                          type="button"
-                          className="finding-item-btn"
-                          onClick={() => handleJumpToParagraph(f.paragraph_index)}
-                        >
-                          <span className="finding-category">
-                            Avsnitt {f.paragraph_index} · {f.category}
-                          </span>
-                          <span className="finding-confidence">
-                            {Math.round(f.confidence * 100)}% träffsäkerhet
-                          </span>
-                          <span className="finding-preview">”{f.preview}”</span>
-                          <span className="finding-jump-link">Visa i text →</span>
-                        </button>
+                        <div className="finding-item-row">
+                          <button
+                            type="button"
+                            className="finding-item-btn"
+                            onClick={() => handleJumpToParagraph(f.paragraph_index)}
+                          >
+                            <span className="finding-category">
+                              Avsnitt {f.paragraph_index} · {f.category}
+                            </span>
+                            <span className="finding-confidence">
+                              {Math.round(f.confidence * 100)}% träffsäkerhet
+                            </span>
+                            <span className="finding-preview">”{f.preview}”</span>
+                            <span className="finding-jump-link">Visa i text →</span>
+                          </button>
+                          <button
+                            type="button"
+                            className="finding-dismiss-btn"
+                            onClick={() => toggleDismissFinding(f.paragraph_index)}
+                            title="Jag har granskat detta avsnitt och bedömer det säkert efter maskering"
+                          >
+                            <Check size={12} aria-hidden="true" />
+                            <span>Klarmarkera</span>
+                          </button>
+                        </div>
                       </li>
                     ))}
                   </ul>
@@ -1710,18 +2221,11 @@ export default function App() {
                   className="editor-textarea"
                   placeholder="Klistra in text här (Ctrl+V), skriv direkt, eller dra och släpp Word (.docx), Excel (.xlsx), PDF (.pdf) eller textfil..."
                   value={sourceText}
-                  onChange={(e) => {
-                    setSourceText(e.target.value);
-                    if (matches.length > 0 || hasAnalyzed) {
-                      setMatches([]);
-                      setHasAnalyzed(false);
-                      setReport(null);
-                    }
-                  }}
+                  onChange={(e) => handleSourceTextEdit(e.target.value)}
                 />
                 {!sourceText && (
                   <div className="editor-empty-hint">
-                    <Clipboard size={32} />
+                    <Clipboard size={32} aria-hidden="true" />
                     <p>
                       Klistra in text (Ctrl+V) eller dra och släpp Word (.docx), Excel (.xlsx), PDF (.pdf) eller .txt här
                     </p>
@@ -1734,10 +2238,21 @@ export default function App() {
                   <span>
                     Visar granskningsvy ({activeMatches.length} aktiva maskeringar
                     {charFindings.length > 0 &&
-                      ` · ${charFindings.length} känsliga avsnitt markerade`}
-                    {" · "}klicka på ett markerat ord för att undanta/avmaskera):
+                      ` · ${charFindings.length} känsliga avsnitt`}
+                    {" · "}klicka på ord för att undanta, eller dubbelklicka på ett stycke för att redigera på plats):
                   </span>
                   <div className="review-header-actions">
+                    {textEditedSinceScan && (
+                      <button
+                        type="button"
+                        className="tb-btn-subtle rescan-chip"
+                        onClick={handleAnalyze}
+                        title="Texten har redigerats — klicka för att skanna nya ord och kontext"
+                      >
+                        <RefreshCw size={12} aria-hidden="true" />
+                        <span>Uppdatera analys</span>
+                      </button>
+                    )}
                     {charFindings.length > 0 && (
                       <button
                         type="button"
@@ -1757,7 +2272,7 @@ export default function App() {
                       className="tb-btn-subtle"
                       onClick={() => setIsEditing(true)}
                     >
-                      Ändra källtext
+                      Redigera heltext
                     </button>
                   </div>
                 </div>
@@ -1950,28 +2465,55 @@ export default function App() {
                 <span className="unmask-label-text">
                   2. Avmaskerat svar (återställt med originalvärden):
                 </span>
-                <span className="copy-wrapper">
+                <div className="unmask-header-actions">
                   <button
                     type="button"
-                    className="tb-btn-copy"
-                    onClick={handleCopyUnmasked}
-                    disabled={!unmaskedResult.text}
-                    aria-label="Kopiera avmaskerat svar"
+                    className="tb-preset-btn unmask-format-toggle"
+                    aria-pressed={formattedUnmaskView}
+                    onClick={() => setFormattedUnmaskView((v) => !v)}
+                    title="Växla mellan snyggt formaterat dokumentläge och rå Markdown-text"
                   >
-                    <Copy size={14} />
-                    <span>Kopiera svar</span>
+                    <FileText size={13} aria-hidden="true" />
+                    <span>{formattedUnmaskView ? "Formaterad vy" : "Råtext"}</span>
                   </button>
-                  <span
-                    ref={copyTipUnmaskedRef}
-                    className={`copy-bubble ${copyStatusUnmasked ? "show" : ""}`}
-                    role="status"
-                  >
-                    {copyStatusUnmasked}
+                  <span className="copy-wrapper">
+                    <button
+                      type="button"
+                      className="tb-btn-copy"
+                      onClick={handleCopyUnmasked}
+                      disabled={!unmaskedResult.text}
+                      data-copied={copyStatusUnmasked.startsWith("Kopierad") ? "" : undefined}
+                      title="Kopierar som formaterad text (för Word/Outlook/Teams) samt ren text"
+                    >
+                      {copyStatusUnmasked.startsWith("Kopierad") ? (
+                        <Check size={14} aria-hidden="true" />
+                      ) : (
+                        <Copy size={14} aria-hidden="true" />
+                      )}
+                      <span>Kopiera svar</span>
+                    </button>
+                    <span
+                      ref={copyTipUnmaskedRef}
+                      className={`copy-bubble ${copyStatusUnmasked ? "show" : ""}`}
+                      role="status"
+                    >
+                      {copyStatusUnmasked}
+                    </span>
                   </span>
-                </span>
+                </div>
               </div>
-              <div className="unmasked-preview-box">
-                {unmaskedResult.text || (
+              <div
+                className={`unmasked-preview-box ${
+                  formattedUnmaskView ? "formatted-mode" : "raw-mode"
+                }`}
+              >
+                {unmaskedResult.text ? (
+                  formattedUnmaskView ? (
+                    renderFormattedMarkdown(unmaskedResult.text)
+                  ) : (
+                    unmaskedResult.text
+                  )
+                ) : (
                   <span className="empty-italic">
                     Det återställda svaret visas här automatiskt så snart du klistrar in ett svar…
                   </span>

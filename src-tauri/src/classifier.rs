@@ -61,11 +61,11 @@ const PROTOTYPE_GROUPS: &[PrototypeGroup] = &[
         category: "Hälsa & Vård (GDPR Art. 9)",
         axis: "integritet",
         severity: "high",
-        reason: "Beskriver medicinskt tillstånd, diagnos, behandling eller vårdkontakt som kan röja känsliga personuppgifter även utan namn.",
+        reason: "Beskriver enskild persons medicinska tillstånd, diagnos, behandling eller vårdkontakt som kan röja känsliga personuppgifter även utan namn.",
         prompts: &[
-            "Patientjournal, sjukdomshistoria, medicinsk diagnos, läkemedelsbehandling, psykiatrisk bedömning, sjukskrivning eller rehabiliteringsärende.",
-            "Beskrivning av en persons fysiska eller psykiska hälsotillstånd, symtom, operation, vårdplan, provsvar, missbruk eller funktionsnedsättning.",
-            "Patienten har varit sjukskriven på grund av utmattning, depression, ångest, smärta eller genomgår utredning och medicinering inom vården.",
+            "Patientjournal för enskild patient, sjukdomshistoria, medicinsk diagnos, läkemedelsbehandling, psykiatrisk bedömning, sjukskrivning eller rehabiliteringsärende.",
+            "Beskrivning av en specifik persons fysiska eller psykiska hälsotillstånd, symtom, operation, vårdplan, provsvar, missbruk eller funktionsnedsättning.",
+            "Patienten har varit sjukskriven på grund av utmattning, depression, ångest, smärta eller genomgår medicinsk utredning och behandling.",
         ],
     },
     PrototypeGroup {
@@ -74,9 +74,9 @@ const PROTOTYPE_GROUPS: &[PrototypeGroup] = &[
         severity: "high",
         reason: "Innehåller uppgifter om brottsmisstanke, rättsprocess, socialtjänst, politisk åsikt, fackförening eller religion.",
         prompts: &[
-            "Uppgifter om politiska åsikter, partimedlemskap, facklig tillhörighet, religiös övertygelse eller sexuell läggning.",
-            "Brottsmisstanke, polisanmälan, förundersökning, åtal, dom i brottmål, disciplinärende, tvångsvård eller utredning hos socialtjänsten.",
-            "Orosanmälan, ekonomiskt bistånd, skuldsanering hos Kronofogden, omhändertagande enligt LVU eller LVM eller pågående rättstvist.",
+            "Uppgifter om enskild persons politiska åsikter, partimedlemskap, facklig tillhörighet, religiös övertygelse eller sexuell läggning.",
+            "Brottsmisstanke, polisanmälan, förundersökning, åtal, dom i brottmål, disciplinärende, tvångsvård eller individutredning hos socialtjänsten.",
+            "Orosanmälan kring barn eller individ, ekonomiskt bistånd, skuldsanering hos Kronofogden, omhändertagande enligt LVU eller LVM eller pågående rättstvist.",
         ],
     },
     PrototypeGroup {
@@ -85,8 +85,8 @@ const PROTOTYPE_GROUPS: &[PrototypeGroup] = &[
         severity: "high",
         reason: "Liknar intern affärsstrategi, opublicerade siffror, prissättning, förvärvsbud eller konfidentiella avtalsvillkor.",
         prompts: &[
-            "Konfidentiell affärsstrategi, företagshemlighet, opublicerat bokslut, intern budget, vinstmarginal, företagsförvärv eller styrelseprotokoll.",
-            "Icke-offentlig kundoffert, konfidentiellt avtal, timpriser, rabattstruktur, inköpspriser, upphandlingsanbud eller förhandlingsstrategi.",
+            "Konfidentiell affärsstrategi, företagshemlighet, opublicerat bokslut, vinstmarginal, företagsförvärv, uppköpsbud eller hemligt styrelsebeslut.",
+            "Icke-offentlig kundoffert, konfidentiellt avtal, detaljerade timpriser, rabattstruktur, inköpspriser, upphandlingsanbud eller förhandlingsstrategi.",
             "Inför styrelsemötet föreslår vi ett konfidentiellt bud, opublicerad omsättningsprognos, bruttomarginal eller exklusivt samarbetsavtal innan rapporten offentliggörs.",
         ],
     },
@@ -94,30 +94,30 @@ const PROTOTYPE_GROUPS: &[PrototypeGroup] = &[
         category: "Säkerhet, IT-arkitektur & Intern kod",
         axis: "säkerhet",
         severity: "high",
-        reason: "Berör intern IT-säkerhet, sårbarheter, nätverks-/systemarkitektur, behörigheter eller proprietär systemlogik.",
+        reason: "Berör konkret IT-sårbarhet, penetrationstest, brandväggs-/nätverkskonfiguration, hemlig arkitektur eller proprietär källkod.",
         prompts: &[
-            "Intern IT-säkerhet, sårbarhetsrapport, penetrationstest, brandväggsregler, intern nätverksarkitektur, säkerhetsincident eller åtkomstkontroller.",
-            "Proprietär intern källkod, produktionskonfiguration, databasstruktur med affärslogik, API-nycklar eller säkerhetsklassad verksamhet.",
-            "Vid säkerhetsgranskningen upptäcktes en sårbarhet i autentiseringstjänsten bakom brandväggen som ger obehörig åtkomst till interna system eller databaser.",
+            "Teknisk sårbarhetsrapport, exploatering, SQL-injektion, penetrationstest, brandväggsregler, intern nätverkstopologi eller aktivt dataintrång.",
+            "Proprietär intern källkod, hemliga produktionsnycklar, krypteringsnycklar, autentiseringsbugg eller oskyddad databasendpoint i produktionsmiljö.",
+            "Vid säkerhetsgranskningen upptäcktes en kritisk sårbarhet i autentiseringstjänsten bakom brandväggen som ger obehörig läs- eller skrivåtkomst till databaser.",
         ],
     },
     PrototypeGroup {
         category: "Tjänstekort, eID, Behörighet & Intranät",
         axis: "säkerhet",
         severity: "high",
-        reason: "Innehåller uppgifter om SITHS-kort, tjänstekort, e-legitimation/certifikat, korthandläggare eller interna intranätlänkar och säkerhetsrutiner.",
+        reason: "Innehåller uppgifter om SITHS-kort, tjänstekort, e-legitimation/certifikat, korthandläggare eller specifika intranätlänkar för behörighet.",
         prompts: &[
             "Ditt SITHS eID certifikat på ditt SITHS-kort, tjänstekort, reservkort eller konsultkort kommer att upphöra och behöver förnyas hos korthandläggare eller ID-fotokontor.",
-            "Intern information om e-legitimation, behörighetskort, HSA-ID, aktivering av tjänstekort, inloggningscertifikat, passerkort eller länk till internt intranät inom region, myndighet eller företag.",
+            "Förnyelse av e-legitimation, behörighetskort, HSA-ID, aktivering av personligt tjänstekort, PIN-/PUK-kod eller inloggningscertifikat.",
         ],
     },
     PrototypeGroup {
         category: "HR & Personalärende",
         axis: "affär",
         severity: "medium",
-        reason: "Innehåller bedömning av medarbetare/kandidat, löneuppgifter, arbetsrättsligt ärende eller intern personalfråga.",
+        reason: "Innehåller bedömning av enskild medarbetare/kandidat, individuell lön, arbetsrättsligt ärende eller rehabilitering.",
         prompts: &[
-            "Medarbetarsamtal, individuell lönesättning, löneanspråk, omplacering, skriftlig varning, arbetsrättslig förhandling, uppsägning eller kandidatbedömning.",
+            "Enskilt medarbetarsamtal, individuell lönesättning, löneanspråk, omplacering, skriftlig varning, arbetsrättslig förhandling, uppsägning eller kandidatbedömning.",
         ],
     },
 ];
@@ -128,6 +128,9 @@ const NEUTRAL_PROMPTS: &[&str] = &[
     "Sammanfattning av offentliga riktlinjer, publicerad myndighetsrapport, öppen presentation eller generella skrivtips.",
     "Allmän fråga om språkgranskning, sammanfattning av offentlig artikel, recept, öppen källkod eller generella programmeringskoncept.",
     "Kort allmän fråga om öppettider, publik leveransinformation eller allmän produktfunktion utan interna system eller personuppgifter.",
+    "Minnesanteckningar från arbetsplatsträff, mötesprotokoll, dagordning, enhet, datum och tid, plats, närvarande medarbetare, mötesledare och sekreterare.",
+    "Allmänt verksamhetsläge och bemanning inför jul, nyår och semester, beläggning i telefonrådgivning, tillgänglighetsmål, täckning av sjuksköterskepass och läkarpass samt julschema och hyrpersonal.",
+    "Allmänna mötespunkter på vårdcentral, skola, kommun eller kontor om schemaläggning, lokaler, trivsel, allmänna rutiner och planering utan enskilda patientuppgifter eller säkerhetssårbarheter.",
 ];
 
 struct EmbeddedPrototype {
@@ -342,9 +345,13 @@ impl EmbeddingClassifier {
         }
         let total_paras = paragraphs.len();
 
-        let formatted: Vec<String> = paragraphs
+        let cleaned_queries: Vec<String> = paragraphs
             .iter()
-            .map(|(_, _, slice)| format!("task: classification | query: {slice}"))
+            .map(|(_, _, slice)| clean_for_embedding(slice))
+            .collect();
+        let formatted: Vec<String> = cleaned_queries
+            .iter()
+            .map(|clean| format!("task: classification | query: {clean}"))
             .collect();
         let refs: Vec<&str> = formatted.iter().map(|s| s.as_str()).collect();
         let Ok(vecs) = self.embed_texts_with_progress(&refs, on_progress) else {
@@ -352,9 +359,18 @@ impl EmbeddingClassifier {
         };
 
         let mut findings = Vec::new();
-        for ((p_idx, (byte_start, byte_end, slice)), vec) in
-            paragraphs.into_iter().enumerate().zip(vecs)
+        for (((p_idx, (byte_start, byte_end, slice)), clean), vec) in paragraphs
+            .into_iter()
+            .enumerate()
+            .zip(cleaned_queries.iter())
+            .zip(vecs)
         {
+            // Fristående rubriker (t.ex. "**MINNESANTECKNINGAR – ARBETSPLATSTRÄFF (APT)**"
+            // eller "## 1. Verksamhetsläge") saknar brödtext och ska inte ensamflaggas.
+            if is_standalone_heading(slice, clean) {
+                continue;
+            }
+
             let neutral_best = self
                 .neutral_vecs
                 .iter()
@@ -372,18 +388,19 @@ impl EmbeddingClassifier {
             if let Some((g_idx, best_sim)) = best_group {
                 let margin = best_sim - neutral_best;
                 // Kalibrerat mot EmbeddingGemma 2 (768d, `task: classification | query:`):
-                // vardaglig/publik text har margin <= 0.00, medan känsliga stycken ligger på ~0.032..0.19+
-                if best_sim >= 0.76 && margin >= 0.030 {
+                // vardaglig/publik eller allmän mötes-/verksamhetstext har margin <= 0.02,
+                // medan genuint känsliga stycken ligger på ~0.032..0.19+
+                if best_sim >= 0.76 && margin >= 0.032 {
                     let grp = &PROTOTYPE_GROUPS[g_idx];
-                    let clean_line = slice.replace('\n', " ");
+                    let clean_line = clean.replace('\n', " ");
                     let preview: String = clean_line.chars().take(135).collect();
                     let preview = if clean_line.chars().count() > 135 {
                         format!("{}…", preview.trim_end())
                     } else {
                         preview
                     };
-                    let conf = (0.62 + ((margin - 0.030) / 0.090) * 0.35).clamp(0.62, 0.98);
-                    let severity = if grp.severity == "high" && (margin >= 0.050 || best_sim >= 0.83)
+                    let conf = (0.62 + ((margin - 0.032) / 0.090) * 0.35).clamp(0.62, 0.98);
+                    let severity = if grp.severity == "high" && (margin >= 0.052 || best_sim >= 0.83)
                     {
                         "high"
                     } else {
@@ -407,6 +424,59 @@ impl EmbeddingClassifier {
 
         (findings, total_paras)
     }
+}
+
+/// Rensar Markdown-formatering (`#`, `**`, `__`, `` ` ``, listpunkter) före inbäddning
+/// så att råa formateringstecken inte förskjuter vektorlikheten.
+fn clean_for_embedding(slice: &str) -> String {
+    let mut lines_out = Vec::new();
+    for line in slice.lines() {
+        let mut l = line.trim();
+        // Ta bort inledande Markdown-rubrik- eller listsymboler
+        if l.starts_with('#') {
+            l = l.trim_start_matches('#').trim_start();
+        } else if let Some(rest) = l
+            .strip_prefix("* ")
+            .or_else(|| l.strip_prefix("- "))
+            .or_else(|| l.strip_prefix("• "))
+        {
+            l = rest.trim_start();
+        }
+        let cleaned: String = l
+            .replace("**", "")
+            .replace("__", "")
+            .replace('`', "");
+        if !cleaned.trim().is_empty() {
+            lines_out.push(cleaned);
+        }
+    }
+    lines_out.join("\n")
+}
+
+/// Avgör om ett avsnitt bara är en fristående rubrik utan brödtextmeningar.
+fn is_standalone_heading(raw_slice: &str, clean_slice: &str) -> bool {
+    let raw_trimmed = raw_slice.trim();
+    let non_empty_lines: Vec<&str> = raw_trimmed
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if non_empty_lines.len() != 1 {
+        return false;
+    }
+    let line = non_empty_lines[0];
+    let is_md_heading = line.starts_with('#')
+        || (line.starts_with("**") && line.ends_with("**") && line.len() > 4);
+    let clean_trimmed = clean_slice.trim();
+    let has_sentence_punct = clean_trimmed.ends_with('.')
+        || clean_trimmed.ends_with('!')
+        || clean_trimmed.ends_with('?');
+    let word_count = clean_trimmed.split_whitespace().count();
+
+    if is_md_heading && !has_sentence_punct && word_count <= 14 {
+        return true;
+    }
+    !has_sentence_punct && word_count <= 8 && clean_trimmed.chars().count() <= 75
 }
 
 fn raw_double_newline_blocks(text: &str) -> Vec<(usize, usize)> {
@@ -636,11 +706,19 @@ pub fn build_report(
     let has_high_semantic = findings.iter().any(|f| f.severity == "high");
     let has_any_semantic = !findings.is_empty();
 
+    // Skilj på generella eID-/kortrutiner (där faran ligger i kortnummer, HSA-ID och intranätlänk
+    // som maskeras bort av Lager 1/2) och sakligt känslig kontext (GDPR Art. 9–10 hälsa/brott,
+    // opublicerade affärssiffror/M&A eller konkreta IT-sårbarheter).
+    let substantive_context_count = findings
+        .iter()
+        .filter(|f| f.category != "Tjänstekort, eID, Behörighet & Intranät")
+        .count();
+
     // 1. Bedömning av ORIGINALTEXTEN (före maskering)
     let (verdict_before_mask, summary_before) = if secret_count > 0 || has_high_semantic {
         (
             "do_not_share".to_string(),
-            "Stopp: Originaltexten innehåller känsligt/konfidentiellt innehåll eller tekniska nycklar och får inte klistras in i en öppen AI-tjänst.".to_string(),
+            "Dela ej omaskerad: Originaltexten innehåller känsligt innehåll, kortnummer eller interna nycklar/länkar.".to_string(),
         )
     } else if active_pii_count > 0 || unmasked_pii_count > 0 {
         (
@@ -670,30 +748,39 @@ pub fn build_report(
     let (verdict_after_mask, summary_after) = if unmasked_secret_count > 0 {
         (
             "do_not_share".to_string(),
-            "Dela ej: Du har avmarkerat en teknisk hemlighet/nyckel eller intern länk — den maskerade texten är inte säker att dela!".to_string(),
+            "Dela ej i öppen AI: Du har lämnat en teknisk nyckel, ett kortnummer eller en intern länk omaskerad i texten!".to_string(),
         )
-    } else if has_high_semantic {
+    } else if unmasked_pii_count > 0 && has_high_semantic {
         (
             "do_not_share".to_string(),
             format!(
-                "Dela ej i öppen AI: Trots att identifierare har maskerats innehåller {} textavsnitt känslig kontext (t.ex. vård/hälsa, affärshemligheter, eID/tjänstekort eller intern IT-säkerhet).",
-                findings.len()
+                "Dela ej i öppen AI: {} personuppgift(er) är lämnade omaskerade i en text med känslig kontext.",
+                unmasked_pii_count
             ),
         )
     } else if unmasked_pii_count > 0 {
         (
             "caution_after_mask".to_string(),
             format!(
-                "Granska: {} träff(ar) har lämnats omaskerade i texten.",
+                "Granska före delning: {} träff(ar) har undantagits och lämnats omaskerade i texten.",
                 unmasked_pii_count
             ),
         )
-    } else if has_any_semantic {
+    } else if substantive_context_count > 0 {
         (
             "caution_after_mask".to_string(),
             format!(
-                "Granska: Personuppgifter är maskerade, men {} textavsnitt har intern karaktär — kontrollera innan delning i extern AI.",
-                findings.len()
+                "Granska före delning: Direkta namn och identifierare är maskerade, men {} avsnitt innehåller sakuppgifter (t.ex. vård/hälsa, affärssiffror eller sårbarhetsdetaljer) som kan innebära bakvägsidentifiering eller företagssekretess. Kontrollera avsnitten nedan eller klarmarkera dem när du har granskat.",
+                substantive_context_count
+            ),
+        )
+    } else if has_any_semantic {
+        // T.ex. SITHS-/tjänstekortsrutin där kortnummer, intranätlänk och organisation nu är maskerade
+        (
+            "safe".to_string(),
+            format!(
+                "Redo för AI: {} identifierare/länkar har maskerats bort och kvarvarande eID-/rutintext saknar exponerade nycklar.",
+                active_pii_count + secret_count
             ),
         )
     } else {
@@ -824,6 +911,53 @@ Vänliga hälsningar\n\
         assert!(
             !siths_findings.is_empty() && siths_findings.iter().any(|f| f.severity == "high"),
             "SITHS-meddelandet ska flaggas som hög känslighet under säkerhet/eID"
+        );
+
+        let siths_rep = build_report(3, 0, 1, 0, true, siths_scanned, 10, siths_findings);
+        assert_eq!(siths_rep.verdict_before_mask, "do_not_share");
+        assert_eq!(
+            siths_rep.verdict_after_mask, "safe",
+            "SITHS-mejlet ska bli Grönt (safe) efter att kortnummer, länk och org är maskerade"
+        );
+
+        let health_rep = build_report(2, 0, 0, 0, true, scanned, 10, findings);
+        assert_eq!(health_rep.verdict_before_mask, "do_not_share");
+        assert_eq!(
+            health_rep.verdict_after_mask, "caution_after_mask",
+            "Hälsa/M&A/sårbarhet ska bli Gult (caution_after_mask) när identifierare är maskerade"
+        );
+
+        // APT-exemplet från användarens skärmbild: varken rubriken "**MINNESANTECKNINGAR – ARBETSPLATSTRÄFF (APT)**"
+        // eller bemanningsavsnittet "## 1. Verksamhetsläge och bemanning inför jul och nyår" ska falskflaggas!
+        let apt_masked = "\
+**MINNESANTECKNINGAR – ARBETSPLATSTRÄFF (APT)**\n\n\
+* **Enhet:** [PLATS A], [PLATS B] (fiktiv enhet)\n\
+* **Datum och tid:** 2026-11-11, kl. 13:00–14:30\n\
+* **Plats:** Konferensrum Eken / Digitalt via intern videolänk\n\
+* **Närvarande:** 18 medarbetare (frånvarande tar del av protokollet via intranätets låsta enhetsyta)\n\
+* **Mötesledare:** [PERSON A], vårdenhetschef\n\
+* **Sekreterare:** [PERSON B], medicinsk sekreterare\n\n\
+## 1. Verksamhetsläge och bemanning inför jul och nyår\n\n\
+Beläggningen och trycket i telefonrådgivningen ligger [ÖVRIGT A] högre än motsvarande vecka föregående år. För att klara tillgänglighetsmålen under vecka 52 och 53 saknas i nuläget täckning på tre sjuksköterskepass och två läkarpass.\n\n\
+* **Åtgärd:** Förslag till slutligt julschema ligger i den interna schemamappen. Eventuella byten av pass måste läggas in senast fredag 13 november kl. 12:00 innan schemat låses. Vid kvarstående luckor aktiveras avrop av upphandlad hyrpersonal för vecka 53.";
+
+        let (apt_findings, apt_scanned) =
+            clf.scan_paragraphs_with_progress(apt_masked, apt_masked, |_, _| {});
+        println!("APT ihopslagna block: {apt_scanned}, flaggade: {}", apt_findings.len());
+        for f in &apt_findings {
+            println!(
+                "  APT Block {}: {} ({}, {:.0}%) => {}",
+                f.paragraph_index,
+                f.category,
+                f.severity,
+                f.confidence * 100.0,
+                f.preview
+            );
+        }
+        assert_eq!(
+            apt_findings.len(),
+            0,
+            "APT-rubriken och bemanningsavsnittet får INTE falskflaggas som säkerhetskänsliga!"
         );
     }
 }
