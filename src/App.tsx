@@ -71,7 +71,7 @@ const ALL_CATEGORIES = [...REGEX_LABELS, ...ENTITY_LABELS];
 
 const PRESETS = {
   ai_safe: {
-    name: "AI-säker (Standard)",
+    name: "AI-säker",
     entities: [
       "Personnummer",
       "E-post",
@@ -87,7 +87,7 @@ const PRESETS = {
     ],
   },
   id_only: {
-    name: "Endast ID & Kontakt",
+    name: "Endast ID & kontakt",
     entities: [
       "Personnummer",
       "E-post",
@@ -314,6 +314,7 @@ export default function App() {
   const [copyStatusUnmasked, setCopyStatusUnmasked] = useState<string>("");
   const copyTipMaskedRef = useRef<HTMLSpanElement>(null);
   const copyTipUnmaskedRef = useRef<HTMLSpanElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const lastCopyMsgRef = useRef<string>("");
   const copyTimerMaskedRef = useRef<number | undefined>(undefined);
   const copyTimerUnmaskedRef = useRef<number | undefined>(undefined);
@@ -1345,7 +1346,6 @@ export default function App() {
 
       return blocks.map((blk, bIdx) => {
         const isEditingThisBlock =
-          !insideFlaggedCard &&
           editingSlice !== null &&
           editingSlice.start === blk.start &&
           editingSlice.end === blk.end;
@@ -1355,6 +1355,13 @@ export default function App() {
             <div
               key={`${keyPrefix}-blk-edit-${bIdx}`}
               className="inline-slice-editor"
+              onBlur={(e) => {
+                if (!document.hasFocus()) return;
+                if (e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                  return;
+                }
+                commitInlineSliceEdit();
+              }}
             >
               <textarea
                 className="inline-slice-textarea"
@@ -1378,7 +1385,7 @@ export default function App() {
               />
               <div className="inline-slice-actions">
                 <span className="inline-slice-hint">
-                  Övriga maskeringar bevaras (Ctrl+Retur sparar)
+                  Klicka utanför eller Ctrl+Retur sparar · Esc avbryter
                 </span>
                 <button
                   type="button"
@@ -1393,7 +1400,7 @@ export default function App() {
                   onClick={commitInlineSliceEdit}
                 >
                   <Check size={14} aria-hidden="true" />
-                  <span>Spara ändring</span>
+                  <span>Klar</span>
                 </button>
               </div>
             </div>
@@ -1420,44 +1427,22 @@ export default function App() {
           lStart = lEnd + 1;
         }
 
-        if (insideFlaggedCard) {
-          return (
-            <div key={`${keyPrefix}-blk-${bIdx}`} className="doc-para">
-              {lines}
-            </div>
-          );
-        }
-
         return (
           <div
             key={`${keyPrefix}-blk-${bIdx}`}
-            className="doc-para doc-para-editable"
-            onDoubleClick={() =>
+            className={`doc-para ${insideFlaggedCard ? "doc-para-in-card" : "doc-para-editable"}`}
+            onClick={() => {
+              const sel = window.getSelection();
+              if (sel && !sel.isCollapsed) return;
               setEditingSlice({
                 start: blk.start,
                 end: blk.end,
                 draft: sourceText.slice(blk.start, blk.end),
-              })
-            }
-            title="Dubbelklicka för att redigera detta stycke direkt utan att tappa maskeringar"
+              });
+            }}
+            title="Klicka i stycket för att redigera på plats (klicka utanför för att spara)"
           >
             {lines}
-            <button
-              type="button"
-              className="para-inline-edit-btn"
-              onClick={() =>
-                setEditingSlice({
-                  start: blk.start,
-                  end: blk.end,
-                  draft: sourceText.slice(blk.start, blk.end),
-                })
-              }
-              aria-label="Redigera stycke"
-              title="Redigera detta stycke på plats"
-            >
-              <Pencil size={12} aria-hidden="true" />
-              <span>Redigera</span>
-            </button>
           </div>
         );
       });
@@ -1492,6 +1477,10 @@ export default function App() {
       }
 
       const isFocused = focusedParaIndex === f.paragraph_index;
+      const isEditingWholeFlagged =
+        editingSlice !== null &&
+        editingSlice.start === fStart &&
+        editingSlice.end === fEnd;
 
       elements.push(
         <div
@@ -1502,17 +1491,14 @@ export default function App() {
           }`}
         >
           <div className="flagged-para-header">
-            <span className="flagged-para-title">
+            <span
+              className="flagged-para-title"
+              title={`${f.reason} (${Math.round(f.confidence * 100)}% samstämmighet)`}
+            >
               <AlertTriangle size={13} aria-hidden="true" />
-              <span>
-                Avsnitt {f.paragraph_index} · {f.category}
-              </span>
+              <span>{f.category}</span>
             </span>
             <span className="flagged-para-meta">
-              <span className="flagged-para-conf">
-                {Math.round(f.confidence * 100)}% träffsäkerhet
-              </span>
-              <span className="flagged-para-reason">{f.reason}</span>
               <button
                 type="button"
                 className="flagged-action-btn"
@@ -1540,7 +1526,61 @@ export default function App() {
             </span>
           </div>
           <div className="flagged-para-body">
-            {renderSliceWithMatches(fStart, fEnd, `in-p-${idx}`, true)}
+            {isEditingWholeFlagged && editingSlice ? (
+              <div
+                className="inline-slice-editor"
+                onBlur={(e) => {
+                  if (!document.hasFocus()) return;
+                  if (e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                    return;
+                  }
+                  commitInlineSliceEdit();
+                }}
+              >
+                <textarea
+                  className="inline-slice-textarea"
+                  value={editingSlice.draft}
+                  rows={Math.max(2, editingSlice.draft.split("\n").length + 1)}
+                  autoFocus
+                  onChange={(e) =>
+                    setEditingSlice((prev) =>
+                      prev ? { ...prev, draft: e.target.value } : null
+                    )
+                  }
+                  onKeyDown={(e) => {
+                    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                      e.preventDefault();
+                      commitInlineSliceEdit();
+                    } else if (e.key === "Escape") {
+                      e.preventDefault();
+                      setEditingSlice(null);
+                    }
+                  }}
+                />
+                <div className="inline-slice-actions">
+                  <span className="inline-slice-hint">
+                    Klicka utanför eller Ctrl+Retur sparar · Esc avbryter
+                  </span>
+                  <button
+                    type="button"
+                    className="tb-btn-subtle"
+                    onClick={() => setEditingSlice(null)}
+                  >
+                    Avbryt
+                  </button>
+                  <button
+                    type="button"
+                    className="tb-btn-primary inline-save-btn"
+                    onClick={commitInlineSliceEdit}
+                  >
+                    <Check size={14} aria-hidden="true" />
+                    <span>Klar</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              renderSliceWithMatches(fStart, fEnd, `in-p-${idx}`, true)
+            )}
           </div>
         </div>
       );
@@ -1565,6 +1605,8 @@ export default function App() {
     showParaHighlights,
     charFindings,
     focusedParaIndex,
+    editingSlice,
+    commitInlineSliceEdit,
     renderSliceWithMatches,
     toggleDismissFinding,
   ]);
@@ -1608,76 +1650,67 @@ export default function App() {
   const beforeBadge = verdictBadge(report?.verdict_before_mask);
   const afterBadge = verdictBadge(report?.verdict_after_mask);
 
+  const aiBusy = analyzing || classifying || gemmaLoading || !nerReady;
+  const aiStatusText = analyzing
+    ? nerProgress && nerProgress.total > 0
+      ? `Skannar (${nerProgress.chunk}/${nerProgress.total})…`
+      : "Skannar text…"
+    : classifying
+    ? gemmaScanProgress && gemmaScanProgress.total > 0
+      ? `Analyserar kontext (${gemmaScanProgress.chunk}/${gemmaScanProgress.total})…`
+      : "Analyserar kontext…"
+    : gemmaLoading
+    ? gemmaDownloadProgress && gemmaDownloadProgress.total > 0
+      ? `Laddar ner modell (${Math.round(
+          (gemmaDownloadProgress.downloaded / gemmaDownloadProgress.total) * 100
+        )}%)…`
+      : "Laddar kontextmodell…"
+    : !nerReady
+    ? "Startar lokal AI…"
+    : "Lokal AI redo";
+
+  const showUnifiedDocHeader =
+    Boolean(sourceText) &&
+    (hasAnalyzed || matches.length > 0 || charFindings.length > 0);
+
+  const latencyTooltip = [
+    lastDurationMs !== null ? `BERT + Regex: ${Math.round(lastDurationMs)} ms` : "",
+    report?.semantic_available
+      ? `EmbeddingGemma 2: ${report.paragraphs_scanned} avsnitt på ${report.scan_duration_ms} ms`
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   return (
     <div className="maskera-root">
       {/* ── 1. Kompakt header (Modern Web Guidance: < 12% vh) ── */}
       <header className="top-header">
         <div className="header-brand">
           <div className="brand-logo" aria-hidden="true">
-            <Shield size={22} />
+            <Shield size={20} />
           </div>
-          <div>
+          <div className="brand-titles">
             <h1 className="brand-title">Maskera</h1>
-            <span className="brand-tagline">
-              Lokal PII-avidentifiering &amp; AI-gatekeeper
-            </span>
+            <span className="brand-tagline">Lokal avidentifiering för AI</span>
           </div>
         </div>
 
         <div className="header-status-pills">
           <span
             className={`status-pill ${
-              analyzing ? "working" : nerReady ? "ready" : "loading"
-            }`}
-            title={nerStatus}
-          >
-            {analyzing && <RefreshCw size={12} className="spin" />}
-            <span>
-              BERT NER:{" "}
-              {analyzing
-                ? nerProgress && nerProgress.total > 0
-                  ? `Skannar (${nerProgress.chunk}/${nerProgress.total})…`
-                  : "Skannar…"
-                : nerReady
-                ? "Aktiv"
-                : "Laddar…"}
-            </span>
-          </span>
-          <span
-            className={`status-pill ${
-              classifying
+              analyzing || classifying
                 ? "working"
-                : gemmaLoading
+                : gemmaLoading || !nerReady
                 ? "loading"
-                : gemmaReady
-                ? "ready"
-                : gemmaInstalled
-                ? "loading"
-                : "off"
+                : "ready"
             }`}
-            title={gemmaStatus || (gemmaReady ? "Aktiv" : "Ej laddad")}
+            title={`BERT NER: ${nerReady ? "Aktiv" : nerStatus} · EmbeddingGemma 2: ${
+              gemmaReady ? "Aktiv" : gemmaStatus || "Valfri"
+            }`}
           >
-            {(classifying || gemmaLoading) && (
-              <RefreshCw size={12} className="spin" />
-            )}
-            <span>
-              EmbeddingGemma 2:{" "}
-              {classifying
-                ? gemmaScanProgress && gemmaScanProgress.total > 0
-                  ? `Analyserar kontext (${gemmaScanProgress.chunk}/${gemmaScanProgress.total})…`
-                  : "Analyserar kontext…"
-                : gemmaLoading
-                ? gemmaDownloadProgress && gemmaDownloadProgress.total > 0
-                  ? `Laddar ner (${Math.round(
-                      (gemmaDownloadProgress.downloaded /
-                        gemmaDownloadProgress.total) *
-                        100
-                    )}%)…`
-                  : "Initierar modell…"
-                : gemmaReady
-                ? "Aktiv (Lager 3)"
-                : "Valfri"}
-            </span>
+            {aiBusy && <RefreshCw size={12} className="spin" aria-hidden="true" />}
+            <span>{aiStatusText}</span>
           </span>
 
           <button
@@ -1685,25 +1718,40 @@ export default function App() {
             className="theme-toggle-btn"
             onClick={handleQuickToggleTheme}
             title={
-              renderedDark
-                ? "Byt till ljust tema"
-                : "Byt till mörkt tema"
+              renderedDark ? "Byt till ljust tema" : "Byt till mörkt tema"
             }
           >
             {renderedDark ? (
               <>
                 <Sun size={14} aria-hidden="true" />
-                <span>Ljust tema</span>
+                <span>Ljust</span>
               </>
             ) : (
               <>
                 <Moon size={14} aria-hidden="true" />
-                <span>Mörkt tema</span>
+                <span>Mörkt</span>
               </>
             )}
           </button>
         </div>
       </header>
+
+      {/* Dold filväljare utanför role="toolbar" så att verktygsraden enbart har riktiga <button> */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".txt,.log,.md,.csv,.tsv,.json,.xml,.docx,.odt,.xlsx,.xls,.xlsm,.xlsb,.ods,.pdf"
+        className="visually-hidden"
+        tabIndex={-1}
+        aria-hidden="true"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) {
+            handleImportFile(f);
+            e.target.value = "";
+          }
+        }}
+      />
 
       {/* ── 2. Kompakt verktygsrad (Modern Web Guidance: role="toolbar") ── */}
       <div
@@ -1717,14 +1765,16 @@ export default function App() {
             type="button"
             className="tb-btn"
             onClick={handlePasteClipboard}
-            title="Klistra in text från urklipp (Ctrl+V)"
+            title="Klistra in text från urklipp"
           >
             <Clipboard size={15} aria-hidden="true" />
             <span>Klistra in</span>
           </button>
-          <label
+          <button
+            type="button"
             className="tb-btn"
-            title="Öppna Word (.docx/.odt), Excel (.xlsx/.xls/.ods), PDF (.pdf) eller textfil (.txt/.csv/.md)"
+            onClick={() => fileInputRef.current?.click()}
+            title="Öppna Word (.docx/.odt), Excel (.xlsx/.xls/.ods), PDF (.pdf) eller textfil"
           >
             {importingDoc ? (
               <RefreshCw size={15} className="spin" aria-hidden="true" />
@@ -1732,36 +1782,13 @@ export default function App() {
               <Upload size={15} aria-hidden="true" />
             )}
             <span>{importingDoc ? "Läser dokument…" : "Öppna dokument"}</span>
-            <input
-              type="file"
-              accept=".txt,.log,.md,.csv,.tsv,.json,.xml,.docx,.odt,.xlsx,.xls,.xlsm,.xlsb,.ods,.pdf"
-              style={{ display: "none" }}
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) {
-                  handleImportFile(f);
-                  e.target.value = "";
-                }
-              }}
-            />
-          </label>
-          {sourceText && (
-            <button
-              type="button"
-              className={`tb-btn ${isEditing ? "active" : ""}`}
-              onClick={() => setIsEditing((v) => !v)}
-              title={isEditing ? "Gå till markerad granskning" : "Redigera källtexten"}
-            >
-              <FileText size={15} aria-hidden="true" />
-              <span>{isEditing ? "Visa granskning" : "Redigera text"}</span>
-            </button>
-          )}
+          </button>
         </div>
 
         <span role="separator" aria-orientation="vertical" className="tb-sep" />
 
-        {/* Snabbprofiler (aria-pressed) */}
-        <div role="group" aria-label="Profiler" className="toolbar-group">
+        {/* Snabbprofiler + Filterknapp (aria-pressed) */}
+        <div role="group" aria-label="Profiler och filter" className="toolbar-group">
           {(Object.keys(PRESETS) as PresetKey[]).map((key) => (
             <button
               key={key}
@@ -1773,17 +1800,29 @@ export default function App() {
               {PRESETS[key].name}
             </button>
           ))}
+          <button
+            type="button"
+            className="tb-preset-btn tb-filter-btn"
+            aria-pressed={showConfig}
+            onClick={() => setShowConfig((v) => !v)}
+            title="Anpassa kategorier, känslighet, tema och manuella ord"
+          >
+            <Sliders size={14} aria-hidden="true" />
+            <span>Filter</span>
+          </button>
         </div>
 
         <span role="separator" aria-orientation="vertical" className="tb-sep" />
 
-        {/* Primär Granska-knapp */}
-        <div role="group" aria-label="Åtgärder" className="toolbar-group toolbar-group-end">
+        {/* Primär Granska-knapp (aria-disabled behåller fokus i focusgroup) */}
+        <div role="group" aria-label="Analys" className="toolbar-group toolbar-group-end">
           <button
             type="button"
             className="tb-btn-primary"
             onClick={handleAnalyze}
-            disabled={!sourceText.trim() || analyzing || classifying}
+            aria-disabled={
+              !sourceText.trim() || analyzing || classifying ? "true" : undefined
+            }
             title="Kör lokal regex-, BERT NER- och EmbeddingGemma 2-analys"
           >
             {analyzing || classifying ? (
@@ -1799,52 +1838,12 @@ export default function App() {
                 : "Granska & Maskera"}
             </span>
           </button>
-
-          {/* Kopiera maskerad text med Modern Web Guidance copy-button standard */}
-          <span className="copy-wrapper">
-            <button
-              type="button"
-              className="tb-btn-copy"
-              onClick={handleCopyMasked}
-              disabled={!sourceText}
-              data-copied={copyStatusMasked.startsWith("Kopierad") ? "" : undefined}
-              title="Kopiera maskerad text (redo att klistras in i AI)"
-            >
-              {copyStatusMasked.startsWith("Kopierad") ? (
-                <Check size={15} aria-hidden="true" />
-              ) : (
-                <Copy size={15} aria-hidden="true" />
-              )}
-              <span>Kopiera maskerad</span>
-            </button>
-            <span
-              ref={copyTipMaskedRef}
-              className={`copy-bubble ${copyStatusMasked ? "show" : ""}`}
-              role="status"
-            >
-              {copyStatusMasked}
-            </span>
-          </span>
-
-          <button
-            type="button"
-            className="tb-btn-icon"
-            onClick={() => setShowConfig((v) => !v)}
-            aria-label="Filterinställningar"
-            title="Anpassa aktiva kategorier och känslighet"
-          >
-            <Sliders size={16} aria-hidden="true" />
-          </button>
         </div>
       </div>
 
-      {/* ── 3. Expanderbar Filter- och konfigurationsrad (<details>) ── */}
+      {/* ── 3. Filter- och konfigurationspanel ── */}
       {showConfig && (
-        <details open className="filter-drawer">
-          <summary className="filter-drawer-summary">
-            <span>Kategorifilter &amp; konfiguration</span>
-            <ChevronDown size={16} aria-hidden="true" />
-          </summary>
+        <section aria-label="Filterinställningar" className="filter-drawer">
           <div className="filter-drawer-content">
             <div className="filter-chips-row">
               <span className="filter-section-title">Kategorier:</span>
@@ -1966,7 +1965,7 @@ export default function App() {
               </div>
             </div>
           </div>
-        </details>
+        </section>
       )}
 
       {/* ── 4. AI-Gatekeeper & Säkerhetsstatus (Lager 3) ── */}
@@ -1983,8 +1982,8 @@ export default function App() {
                 <RefreshCw size={16} className="spin" />
                 <strong>
                   {analyzing
-                    ? "Steg 1/2: Identifierar personuppgifter, kortnummer & interna länkar (Regex + BERT NER)…"
-                    : "Steg 2/2: EmbeddingGemma 2 analyserar dokumentets kontext & säkerhetsklassning…"}
+                    ? "Steg 1/2: Identifierar personuppgifter, kortnummer & interna länkar…"
+                    : "Steg 2/2: Analyserar dokumentets kontext & säkerhetsklassning…"}
                 </strong>
                 <span className="gatekeeper-step-count">
                   {analyzing && nerProgress && nerProgress.total > 0
@@ -2024,14 +2023,17 @@ export default function App() {
           ) : (
             <>
               <div className="gatekeeper-header">
-                <div className="gatekeeper-badge">
+                <div className="gatekeeper-badge" title={latencyTooltip || undefined}>
                   {afterBadge.icon}
                   <strong>Efter maskering: {afterBadge.text}</strong>
+                  <span className="gatekeeper-summary-inline">
+                    — {report?.summary_after}
+                  </span>
                 </div>
 
                 <div className="gatekeeper-meta">
                   <span className="before-status">
-                    Före maskering: <em>{beforeBadge.text}</em>
+                    Före: <em>{beforeBadge.text}</em>
                   </span>
                   {dismissedFindings.size > 0 && (
                     <button
@@ -2043,32 +2045,19 @@ export default function App() {
                       Återställ {dismissedFindings.size} klarmarkerade
                     </button>
                   )}
-                  {lastDurationMs !== null && (
-                    <span className="latency-tag">
-                      BERT + Regex: {Math.round(lastDurationMs)} ms
-                    </span>
-                  )}
-                  {report?.semantic_available && (
-                    <span className="latency-tag gemma-tag">
-                      EmbeddingGemma 2: {report.paragraphs_scanned} avsnitt på{" "}
-                      {report.scan_duration_ms} ms
-                    </span>
-                  )}
                 </div>
               </div>
 
-              <p className="gatekeeper-summary">{report?.summary_after}</p>
-
-              {/* Känsliga stycken flaggade av EmbeddingGemma 2 */}
+              {/* Sekundär hopp-lista hopfälld i <details> (MWG: content-first-noise-reduction) */}
               {report?.findings && report.findings.length > 0 && (
-                <div className="gatekeeper-findings">
-                  <div className="findings-title">
-                    <AlertTriangle size={14} aria-hidden="true" />
+                <details className="gatekeeper-findings-details">
+                  <summary className="gatekeeper-findings-summary">
+                    <AlertTriangle size={13} aria-hidden="true" />
                     <span>
-                      Flaggade avsnitt från EmbeddingGemma 2 ({report.findings.length}{" "}
-                      st att granska):
+                      Visa {report.findings.length} flaggade avsnitt i listvy
                     </span>
-                  </div>
+                    <ChevronDown size={14} aria-hidden="true" className="details-chevron" />
+                  </summary>
                   <ul className="findings-list" role="list">
                     {report.findings.map((f, i) => (
                       <li key={i} className={`finding-item ${f.severity}`}>
@@ -2080,9 +2069,6 @@ export default function App() {
                           >
                             <span className="finding-category">
                               Avsnitt {f.paragraph_index} · {f.category}
-                            </span>
-                            <span className="finding-confidence">
-                              {Math.round(f.confidence * 100)}% träffsäkerhet
                             </span>
                             <span className="finding-preview">”{f.preview}”</span>
                             <span className="finding-jump-link">Visa i text →</span>
@@ -2100,7 +2086,7 @@ export default function App() {
                       </li>
                     ))}
                   </ul>
-                </div>
+                </details>
               )}
             </>
           )}
@@ -2111,10 +2097,9 @@ export default function App() {
               <div className="gemma-cta-text">
                 <Sparkles size={16} />
                 <span>
-                  <strong>Aktivera djup AI-kontextgranskning:</strong> Hämta
-                  EmbeddingGemma 2 (~197 MB lokalt) för att automatiskt upptäcka
-                  hälsouppgifter (GDPR Art. 9), tjänstekort/eID, företagshemligheter
-                  och IT-säkerhet.
+                  <strong>Aktivera kontextanalys:</strong> Hämta EmbeddingGemma 2
+                  (~197 MB lokalt) för att upptäcka hälsouppgifter, tjänstekort/eID,
+                  företagshemligheter och IT-säkerhet.
                 </span>
               </div>
               <button
@@ -2126,12 +2111,12 @@ export default function App() {
                 {gemmaLoading ? (
                   <>
                     <RefreshCw size={14} className="spin" />
-                    <span>Laddar ner EmbeddingGemma 2…</span>
+                    <span>Laddar ner…</span>
                   </>
                 ) : (
                   <>
                     <Download size={14} />
-                    <span>Hämta EmbeddingGemma 2 (197 MB)</span>
+                    <span>Hämta modell (197 MB)</span>
                   </>
                 )}
               </button>
@@ -2140,55 +2125,88 @@ export default function App() {
         </section>
       )}
 
-      {/* ── 5. Huvudflikar (Modern Web Guidance: tabs med focusgroup="tablist nomemory") ── */}
+      {/* ── 5. Arbetsyta: Dokumentflikar till vänster, Kopiera + Avmaskera AI-svar till höger ── */}
       <main className="main-workspace">
-        <div
-          focusgroup="tablist nomemory"
-          aria-label="Arbetsytor"
-          className="tabs-nav"
-        >
-          <button
-            type="button"
-            id="tab-mask"
-            aria-selected={activeTab === "mask"}
-            focusgroupstart={activeTab === "mask" ? "" : undefined}
-            onClick={() => setActiveTab("mask")}
-            className="tab-trigger"
+        <div className="tabs-nav">
+          <div
+            focusgroup="tablist nomemory"
+            aria-label="Dokumentvyer"
+            className="tabs-list"
           >
-            <FileText size={16} />
-            <span>Text &amp; Maskering</span>
-            {activeMatches.length > 0 && (
-              <span className="tab-badge">{activeMatches.length}</span>
-            )}
-          </button>
-          <button
-            type="button"
-            id="tab-table"
-            aria-selected={activeTab === "table"}
-            focusgroupstart={activeTab === "table" ? "" : undefined}
-            onClick={() => setActiveTab("table")}
-            className="tab-trigger"
-          >
-            <Table size={16} />
-            <span>Översättningstabell</span>
-            {activeTranslationTable.size > 0 && (
-              <span className="tab-badge">{activeTranslationTable.size}</span>
-            )}
-          </button>
-          <button
-            type="button"
-            id="tab-unmask"
-            aria-selected={activeTab === "unmask"}
-            focusgroupstart={activeTab === "unmask" ? "" : undefined}
-            onClick={() => setActiveTab("unmask")}
-            className="tab-trigger"
-          >
-            <RotateCcw size={16} />
-            <span>Avmaskera AI-svar</span>
-            {unmaskedResult.replacements > 0 && (
-              <span className="tab-badge">{unmaskedResult.replacements}</span>
-            )}
-          </button>
+            <button
+              type="button"
+              id="tab-mask"
+              aria-selected={activeTab === "mask"}
+              focusgroupstart={activeTab === "table" ? undefined : ""}
+              onClick={() => setActiveTab("mask")}
+              className="tab-trigger"
+            >
+              <FileText size={16} aria-hidden="true" />
+              <span>Text &amp; Maskering</span>
+              {activeMatches.length > 0 && (
+                <span className="tab-badge">{activeMatches.length}</span>
+              )}
+            </button>
+            <button
+              type="button"
+              id="tab-table"
+              aria-selected={activeTab === "table"}
+              focusgroupstart={activeTab === "table" ? "" : undefined}
+              onClick={() => setActiveTab("table")}
+              className="tab-trigger"
+            >
+              <Table size={16} aria-hidden="true" />
+              <span>Översättningstabell</span>
+              {activeTranslationTable.size > 0 && (
+                <span className="tab-badge">{activeTranslationTable.size}</span>
+              )}
+            </button>
+          </div>
+
+          {/* Åtgärder mot extern AI utanför tablist (MWG: tabs): Kopiera maskerad precis till vänster om Avmaskera AI-svar */}
+          <div className="workspace-ai-actions">
+            <span className="copy-wrapper">
+              <button
+                type="button"
+                className="tb-btn-copy"
+                onClick={handleCopyMasked}
+                disabled={!sourceText}
+                data-copied={copyStatusMasked.startsWith("Kopierad") ? "" : undefined}
+                title="Kopiera maskerad text (redo att klistras in i valfri AI-tjänst)"
+              >
+                {copyStatusMasked.startsWith("Kopierad") ? (
+                  <Check size={15} aria-hidden="true" />
+                ) : (
+                  <Copy size={15} aria-hidden="true" />
+                )}
+                <span>Kopiera maskerad</span>
+              </button>
+              <span
+                ref={copyTipMaskedRef}
+                className={`copy-bubble ${copyStatusMasked ? "show" : ""}`}
+                role="status"
+              >
+                {copyStatusMasked}
+              </span>
+            </span>
+
+            <button
+              type="button"
+              id="tab-unmask"
+              aria-pressed={activeTab === "unmask"}
+              onClick={() =>
+                setActiveTab((prev) => (prev === "unmask" ? "mask" : "unmask"))
+              }
+              className="unmask-nav-btn"
+              title="Klistra in svaret från AI-tjänsten för att återställa alla originalnamn lokalt"
+            >
+              <RotateCcw size={15} aria-hidden="true" />
+              <span>Avmaskera AI-svar</span>
+              {unmaskedResult.replacements > 0 && (
+                <span className="tab-badge">{unmaskedResult.replacements}</span>
+              )}
+            </button>
+          </div>
         </div>
 
         {/* Tab 1: Text & Maskering */}
@@ -2196,11 +2214,10 @@ export default function App() {
           role="tabpanel"
           aria-labelledby="tab-mask"
           hidden={activeTab !== "mask"}
-          tabIndex={0}
           className="tab-panel"
         >
           <div className="panel-inner">
-            {isEditing || (!matches.length && !charFindings.length && !hasAnalyzed) ? (
+            {!showUnifiedDocHeader ? (
               <div
                 className={`textarea-wrapper ${isDragOver ? "dragover" : ""}`}
                 onDragOver={(e) => {
@@ -2233,50 +2250,95 @@ export default function App() {
                 )}
               </div>
             ) : (
-              <div className="review-viewer-wrapper">
+              <div
+                className={`review-viewer-wrapper ${isDragOver ? "dragover" : ""}`}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsDragOver(true);
+                }}
+                onDragLeave={() => setIsDragOver(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setIsDragOver(false);
+                  const f = e.dataTransfer.files?.[0];
+                  if (f) {
+                    handleImportFile(f);
+                  }
+                }}
+              >
                 <div className="review-viewer-header">
-                  <span>
-                    Visar granskningsvy ({activeMatches.length} aktiva maskeringar
-                    {charFindings.length > 0 &&
-                      ` · ${charFindings.length} känsliga avsnitt`}
-                    {" · "}klicka på ord för att undanta, eller dubbelklicka på ett stycke för att redigera på plats):
+                  <span className="review-viewer-hint">
+                    {isEditing
+                      ? "Redigerar källtext — befintliga maskeringar bevaras. Klicka utanför när du är klar."
+                      : "Klicka på en markering för att undanta, eller klicka i ett stycke för att redigera."}
                   </span>
                   <div className="review-header-actions">
-                    {textEditedSinceScan && (
+                    {textEditedSinceScan && !isEditing && (
                       <button
                         type="button"
                         className="tb-btn-subtle rescan-chip"
                         onClick={handleAnalyze}
-                        title="Texten har redigerats — klicka för att skanna nya ord och kontext"
+                        title="Texten har redigerats — klicka för att skanna eventuella nya ord"
                       >
                         <RefreshCw size={12} aria-hidden="true" />
                         <span>Uppdatera analys</span>
                       </button>
                     )}
-                    {charFindings.length > 0 && (
+                    {charFindings.length > 0 && !isEditing && (
                       <button
                         type="button"
                         className="tb-preset-btn para-toggle-btn"
                         aria-pressed={showParaHighlights}
                         onClick={() => setShowParaHighlights((v) => !v)}
-                        title="Visa eller dölj utmärkning av känsliga stycken i texten"
+                        title="Visa eller dölj utmärkning av känsliga avsnitt i texten"
                       >
                         <AlertTriangle size={13} aria-hidden="true" />
-                        <span>
-                          Markera känsliga stycken ({charFindings.length})
-                        </span>
+                        <span>Känsliga avsnitt ({charFindings.length})</span>
                       </button>
                     )}
                     <button
                       type="button"
-                      className="tb-btn-subtle"
-                      onClick={() => setIsEditing(true)}
+                      className="edit-source-btn"
+                      aria-pressed={isEditing}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => {
+                        setEditingSlice(null);
+                        setIsEditing((v) => !v);
+                      }}
+                      title={
+                        isEditing
+                          ? "Avsluta redigering och återgå till granskningsvyn (Esc)"
+                          : "Ändra hela källtexten med bibehållna maskeringar"
+                      }
                     >
-                      Redigera heltext
+                      <Pencil size={13} aria-hidden="true" />
+                      <span>Ändra källtext</span>
                     </button>
                   </div>
                 </div>
-                <div className="review-viewer-content">{renderedReviewText}</div>
+
+                {isEditing ? (
+                  <textarea
+                    className="editor-textarea in-review-card"
+                    value={sourceText}
+                    autoFocus
+                    onChange={(e) => handleSourceTextEdit(e.target.value)}
+                    onBlur={() => {
+                      if (!document.hasFocus()) return;
+                      if (hasAnalyzed && sourceText.trim()) {
+                        setIsEditing(false);
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape" && hasAnalyzed && sourceText.trim()) {
+                        e.preventDefault();
+                        setIsEditing(false);
+                      }
+                    }}
+                  />
+                ) : (
+                  <div className="review-viewer-content">{renderedReviewText}</div>
+                )}
               </div>
             )}
 
@@ -2354,7 +2416,11 @@ export default function App() {
           role="tabpanel"
           aria-labelledby="tab-table"
           hidden={activeTab !== "table"}
-          tabIndex={0}
+          tabIndex={
+            activeTab === "table" && activeTranslationTable.size === 0
+              ? 0
+              : undefined
+          }
           className="tab-panel"
         >
           <div className="panel-inner">
@@ -2439,12 +2505,11 @@ export default function App() {
           </div>
         </div>
 
-        {/* Tab 3: Avmaskera AI-svar */}
+        {/* Vy 3: Avmaskera AI-svar */}
         <div
-          role="tabpanel"
+          role="region"
           aria-labelledby="tab-unmask"
           hidden={activeTab !== "unmask"}
-          tabIndex={0}
           className="tab-panel"
         >
           <div className="panel-inner unmask-grid">

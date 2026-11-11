@@ -196,9 +196,15 @@ body {
   color: #ffffff;
 }
 
+.brand-titles {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+
 .brand-title {
   margin: 0;
-  font-size: 1.25rem;
+  font-size: 1.2rem;
   font-weight: 800;
   letter-spacing: -0.02em;
   color: var(--accent-text);
@@ -206,7 +212,7 @@ body {
 }
 
 .brand-tagline {
-  font-size: 0.74rem;
+  font-size: 0.76rem;
   color: var(--text-muted);
 }
 
@@ -333,15 +339,16 @@ body {
   cursor: not-allowed;
 }
 
-/* MWG: aria-pressed styling för snabbprofiler */
+/* MWG: aria-pressed styling för snabbprofiler & filter (fast font-weight undviker breddhopp) */
 .tb-preset-btn {
   display: inline-flex;
   align-items: center;
+  gap: 0.35rem;
   background: transparent;
   border: 1px solid transparent;
   color: var(--text-secondary);
   font-size: 0.8rem;
-  font-weight: 500;
+  font-weight: 600;
   padding: 0.35rem 0.65rem;
   border-radius: 6px;
   cursor: pointer;
@@ -349,16 +356,21 @@ body {
   min-block-size: 28px;
 }
 
-.tb-preset-btn:hover {
-  color: var(--text-primary);
-  background: var(--bg-surface-elevated);
+@media (hover: hover) {
+  .tb-preset-btn:hover {
+    color: var(--text-primary);
+    background: var(--bg-surface-elevated);
+  }
 }
 
 .tb-preset-btn[aria-pressed="true"] {
   background: light-dark(#e0e7ff, rgba(99, 102, 241, 0.24));
   border-color: var(--accent-color);
   color: var(--accent-text);
-  font-weight: 700;
+}
+
+.tb-filter-btn {
+  border-color: var(--border-subtle);
 }
 
 .tb-btn-primary {
@@ -377,12 +389,15 @@ body {
   min-block-size: 28px;
 }
 
-.tb-btn-primary:hover:not(:disabled) {
-  background: #3730a3;
-  transform: translateY(-1px);
+@media (hover: hover) {
+  .tb-btn-primary:hover:not(:disabled, [aria-disabled="true"]) {
+    background: #3730a3;
+    transform: translateY(-1px);
+  }
 }
 
-.tb-btn-primary:disabled {
+.tb-btn-primary:disabled,
+.tb-btn-primary[aria-disabled="true"] {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -469,7 +484,7 @@ body {
   background: light-dark(#e2e8f0, #334155);
 }
 
-/* ── 3. Expanderbar Filterlåda (<details>) ── */
+/* ── 3. Filterpanel ── */
 .filter-drawer {
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
@@ -479,18 +494,7 @@ body {
   flex-shrink: 0;
 }
 
-.filter-drawer-summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  cursor: pointer;
-  font-weight: 700;
-  color: var(--text-primary);
-  user-select: none;
-}
-
 .filter-drawer-content {
-  margin-top: 0.6rem;
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
@@ -703,8 +707,14 @@ body {
 .gatekeeper-badge {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.45rem;
-  font-size: 0.9rem;
+  font-size: 0.86rem;
+}
+
+.gatekeeper-summary-inline {
+  font-weight: 400;
+  font-size: 0.81rem;
 }
 
 .gatekeeper-meta {
@@ -715,27 +725,40 @@ body {
   flex-wrap: wrap;
 }
 
-.gatekeeper-summary {
-  margin: 0;
-  font-size: 0.82rem;
-  line-height: 1.45;
-}
-
-.gatekeeper-findings {
-  margin-top: 0.3rem;
-  background: light-dark(rgba(255, 255, 255, 0.75), rgba(0, 0, 0, 0.28));
+.gatekeeper-findings-details {
+  margin-top: 0.2rem;
+  background: light-dark(rgba(255, 255, 255, 0.7), rgba(0, 0, 0, 0.24));
   border: 1px solid light-dark(rgba(0, 0, 0, 0.12), rgba(255, 255, 255, 0.1));
   border-radius: 6px;
-  padding: 0.45rem 0.65rem;
-  font-size: 0.78rem;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.77rem;
 }
 
-.findings-title {
+.gatekeeper-findings-summary {
   display: flex;
   align-items: center;
-  gap: 0.35rem;
-  font-weight: 700;
-  margin-bottom: 0.3rem;
+  gap: 0.4rem;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.gatekeeper-findings-summary::-webkit-details-marker {
+  display: none;
+}
+
+.details-chevron {
+  margin-left: auto;
+  transition: transform 0.15s ease;
+}
+
+.gatekeeper-findings-details[open] .details-chevron {
+  transform: rotate(180deg);
+}
+
+.gatekeeper-findings-details[open] .findings-list {
+  margin-top: 0.4rem;
 }
 
 .findings-list {
@@ -893,15 +916,25 @@ body {
 .tabs-nav {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   background: var(--bg-surface-elevated);
   border-bottom: 1px solid var(--border-color);
-  padding: 0 0.5rem;
-  gap: 0.25rem;
+  padding: 0 0.65rem 0 0.35rem;
+  gap: 0.5rem;
   flex-shrink: 0;
+}
+
+.tabs-list {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
 
 .tab-trigger {
   position: relative;
+  flex: none;
   display: inline-flex;
   align-items: center;
   gap: 0.45rem;
@@ -915,14 +948,15 @@ body {
   transition: color 0.15s ease;
 }
 
-.tab-trigger:hover {
-  color: var(--text-primary);
+@media (hover: hover) {
+  .tab-trigger:hover {
+    color: var(--text-primary);
+  }
 }
 
-/* MWG: Style selected tab from [aria-selected="true"] med pseudo-element border */
+/* MWG tabs: ändra inte font-weight på vald flik så att bredden hålls helt stabil */
 .tab-trigger[aria-selected="true"] {
   color: var(--accent-text);
-  font-weight: 700;
 }
 
 .tab-trigger[aria-selected="true"]::after {
@@ -930,6 +964,43 @@ body {
   position: absolute;
   inset: auto 0 0;
   border-block-end: 3px solid var(--accent-color);
+}
+
+.workspace-ai-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.3rem 0;
+  flex-shrink: 0;
+}
+
+.unmask-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 0.35rem 0.75rem;
+  border-radius: 6px;
+  cursor: pointer;
+  min-block-size: 28px;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+@media (hover: hover) {
+  .unmask-nav-btn:hover {
+    background: light-dark(#e2e8f0, #334155);
+  }
+}
+
+.unmask-nav-btn[aria-pressed="true"] {
+  background: light-dark(#e0e7ff, rgba(99, 102, 241, 0.26));
+  border-color: var(--accent-color);
+  color: var(--accent-text);
+  box-shadow: inset 0 0 0 1px var(--accent-color);
 }
 
 .tab-badge {
@@ -1016,6 +1087,12 @@ body {
   border-radius: 8px;
   background: var(--bg-input);
   overflow: hidden;
+  transition: border-color 0.15s ease;
+}
+
+.review-viewer-wrapper.dragover {
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.35);
 }
 
 .review-viewer-header {
@@ -1023,17 +1100,56 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
-  padding: 0.45rem 0.75rem;
+  padding: 0.4rem 0.75rem;
   background: var(--bg-surface-elevated);
   border-bottom: 1px solid var(--border-subtle);
-  font-size: 0.79rem;
+  font-size: 0.78rem;
   color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.review-viewer-hint {
+  min-width: 0;
 }
 
 .review-header-actions {
   display: flex;
   align-items: center;
   gap: 0.45rem;
+  flex-shrink: 0;
+}
+
+.edit-source-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  font-size: 0.77rem;
+  font-weight: 600;
+  padding: 0.25rem 0.65rem;
+  border-radius: 6px;
+  cursor: pointer;
+  min-block-size: 28px;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+@media (hover: hover) {
+  .edit-source-btn:hover {
+    background: light-dark(#e2e8f0, #334155);
+  }
+}
+
+.edit-source-btn[aria-pressed="true"] {
+  background: #4338ca;
+  border-color: #312e81;
+  color: #ffffff;
+}
+
+.editor-textarea.in-review-card {
+  flex: 1;
+  min-height: 0;
 }
 
 .para-toggle-btn {
@@ -1212,68 +1328,19 @@ body {
   margin-bottom: 0;
 }
 
-.doc-para-editable {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.5rem;
+.doc-para-editable,
+.doc-para-in-card {
   border-radius: 6px;
-  padding: 0.2rem 0.35rem;
+  padding: 0.18rem 0.35rem;
   margin-inline: -0.35rem;
+  cursor: text;
   transition: background-color 0.15s ease;
 }
 
-.doc-para-editable > :not(.para-inline-edit-btn) {
-  flex: 1;
-  min-width: 0;
-}
-
-/* MWG copy-button repeated elements: på pekskärmar utan hover ligger knappen i flödet;
-   där hover finns visas knappen på :hover, :focus-within och :focus-visible med opacity */
-.para-inline-edit-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  flex: none;
-  background: var(--bg-surface-elevated);
-  color: var(--text-secondary);
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  padding: 0.15rem 0.45rem;
-  font-size: 0.7rem;
-  font-weight: 600;
-  cursor: pointer;
-  min-inline-size: 24px;
-  min-block-size: 24px;
-}
-
-.para-inline-edit-btn:hover {
-  color: var(--accent-text);
-  border-color: var(--accent-color);
-}
-
 @media (hover: hover) {
-  .doc-para-editable {
-    display: block;
-    position: relative;
-  }
-
   .doc-para-editable:hover,
-  .doc-para-editable:focus-within {
-    background: light-dark(rgba(15, 23, 42, 0.03), rgba(255, 255, 255, 0.035));
-  }
-
-  .para-inline-edit-btn {
-    position: absolute;
-    inset-block-start: 0.2rem;
-    inset-inline-end: 0.25rem;
-    opacity: 0;
-    transition: opacity 0.15s ease;
-  }
-
-  .doc-para-editable:hover .para-inline-edit-btn,
-  .doc-para-editable:focus-within .para-inline-edit-btn,
-  .para-inline-edit-btn:focus-visible {
-    opacity: 1;
+  .doc-para-in-card:hover {
+    background: light-dark(rgba(15, 23, 42, 0.035), rgba(255, 255, 255, 0.04));
   }
 }
 
