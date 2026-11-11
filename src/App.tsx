@@ -22,7 +22,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
 import "./index.css";
-import type { Match, ClassificationReport, SafetyVerdict } from "./types";
+import type {
+  Match,
+  ParagraphFinding,
+  ClassificationReport,
+  SafetyVerdict,
+} from "./types";
 import {
   buildTranslationTable,
   buildMaskedText,
@@ -122,16 +127,10 @@ function fixMojibake(text: string): string {
   }
 }
 
-function fixByteOffsets(text: string, rawMatches: Match[]): Match[] {
-  if (rawMatches.length === 0) return rawMatches;
-
-  const needed = new Set<number>();
-  for (const m of rawMatches) {
-    needed.add(m.start);
-    needed.add(m.end);
-  }
-
+function buildByteToCharMap(text: string, needed: Set<number>): Map<number, number> {
   const byteToChar = new Map<number, number>();
+  if (needed.size === 0) return byteToChar;
+
   let u16 = 0;
   let byteIdx = 0;
   const len = text.length;
@@ -159,11 +158,45 @@ function fixByteOffsets(text: string, rawMatches: Match[]): Match[] {
   if (needed.has(byteIdx)) {
     byteToChar.set(byteIdx, u16);
   }
+  return byteToChar;
+}
+
+function fixByteOffsets(text: string, rawMatches: Match[]): Match[] {
+  if (rawMatches.length === 0) return rawMatches;
+
+  const needed = new Set<number>();
+  for (const m of rawMatches) {
+    needed.add(m.start);
+    needed.add(m.end);
+  }
+
+  const byteToChar = buildByteToCharMap(text, needed);
 
   return rawMatches.map((m) => ({
     ...m,
     start: byteToChar.get(m.start) ?? m.start,
     end: byteToChar.get(m.end) ?? m.end,
+  }));
+}
+
+function fixFindingOffsets(
+  text: string,
+  rawFindings: ParagraphFinding[]
+): ParagraphFinding[] {
+  if (rawFindings.length === 0) return rawFindings;
+
+  const needed = new Set<number>();
+  for (const f of rawFindings) {
+    needed.add(f.start);
+    needed.add(f.end);
+  }
+
+  const byteToChar = buildByteToCharMap(text, needed);
+
+  return rawFindings.map((f) => ({
+    ...f,
+    start: Math.min(text.length, byteToChar.get(f.start) ?? f.start),
+    end: Math.min(text.length, byteToChar.get(f.end) ?? f.end),
   }));
 }
 
@@ -208,6 +241,8 @@ export default function App() {
 
   // AI-gatekeeper (EmbeddingGemma 2 + Secret regex)
   const [report, setReport] = useState<ClassificationReport | null>(null);
+  const [showParaHighlights, setShowParaHighlights] = useState(true);
+  const [focusedParaIndex, setFocusedParaIndex] = useState<number | null>(null);
   const [gemmaInstalled, setGemmaInstalled] = useState(false);
   const [gemmaLoading, setGemmaLoading] = useState(false);
   const [gemmaReady, setGemmaReady] = useState(false);
@@ -628,54 +663,173 @@ export default function App() {
     }
   };
 
-  // Highlight-rendering i läsläge
-  const renderedReviewText = useMemo(() => {
-    if (!matches.length) return sourceText;
+  // Konvertera byte-offsets i flaggade stycken till UTF-16-positioner i sourceText
+  const charFindings = useMemo(() => {
+    if (!report?.findings || !sourceText) return [];
+    return fixFindingOffsets(sourceText, report.findings)
+      .filter((f) => f.end > f.start)
+      .sort((a, b) => a.start - b.start);
+  }, [report?.findings, sourceText]);
 
-    const elements: React.ReactNode[] = [];
-    let lastIndex = 0;
+  // Hoppa till och markera ett flaggat avsnitt i granskningsvyn
+  const handleJumpToParagraph = useCallback((paraIndex: number) => {
+    setActiveTab("mask");
+    setIsEditing(false);
+    setShowParaHighlights(true);
+    setFocusedParaIndex(paraIndex);
+    setTimeout(() => {
+      const el = document.getElementById(`finding-para-${paraIndex}`);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }, 50);
+    setTimeout(() => {
+      setFocusedParaIndex((prev) => (prev === paraIndex ? null : prev));
+    }, 2600);
+  }, []);
 
-    matches.forEach((m, idx) => {
-      if (m.start > lastIndex) {
-        elements.push(
-          <span key={`t-${idx}`}>{sourceText.slice(lastIndex, m.start)}</span>
+  // Hjälpfunktion för att rendera ett intervall [sliceStart, sliceEnd] av sourceText med dess ord-träffar
+  const renderSliceWithMatches = useCallback(
+    (sliceStart: number, sliceEnd: number, keyPrefix: string) => {
+      if (sliceEnd <= sliceStart) return null;
+      const sliceMatches = matches.filter(
+        (m) => m.end > sliceStart && m.start < sliceEnd
+      );
+      if (sliceMatches.length === 0) {
+        return (
+          <span key={`${keyPrefix}-plain`}>
+            {sourceText.slice(sliceStart, sliceEnd)}
+          </span>
         );
       }
 
-      const key = matchKey(m);
-      const ignored = ignoredKeys.has(key);
-      const masked =
-        activeTranslationTable.get(m.text)?.maskedLabel ?? m.label;
+      const nodes: React.ReactNode[] = [];
+      let cursor = sliceStart;
+
+      sliceMatches.forEach((m, idx) => {
+        const mStart = Math.max(m.start, sliceStart);
+        const mEnd = Math.min(m.end, sliceEnd);
+
+        if (mStart > cursor) {
+          nodes.push(
+            <span key={`${keyPrefix}-t-${idx}`}>
+              {sourceText.slice(cursor, mStart)}
+            </span>
+          );
+        }
+
+        const key = matchKey(m);
+        const ignored = ignoredKeys.has(key);
+        const masked =
+          activeTranslationTable.get(m.text)?.maskedLabel ?? m.label;
+
+        nodes.push(
+          <mark
+            key={`${keyPrefix}-m-${idx}`}
+            className={`highlight-chip${ignored ? " ignored" : ""}`}
+            style={{
+              backgroundColor: ignored
+                ? "transparent"
+                : COLORS[m.label] || "#94a3b8",
+            }}
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleIgnored(key);
+            }}
+            title={
+              ignored
+                ? "Klicka för att maskera igen"
+                : "Klicka för att undanta/avmaskera"
+            }
+          >
+            {sourceText.slice(mStart, mEnd)}
+            {!ignored && <span className="entity-tag">[{masked}]</span>}
+          </mark>
+        );
+        cursor = mEnd;
+      });
+
+      if (cursor < sliceEnd) {
+        nodes.push(
+          <span key={`${keyPrefix}-tail`}>
+            {sourceText.slice(cursor, sliceEnd)}
+          </span>
+        );
+      }
+
+      return nodes;
+    },
+    [sourceText, matches, ignoredKeys, activeTranslationTable, toggleIgnored]
+  );
+
+  // Highlight-rendering i läsläge (kombinerar Lager 3-styckemarkeringar och Lager 1/2-ordmarkeringar)
+  const renderedReviewText = useMemo(() => {
+    if (!sourceText) return null;
+    if (!showParaHighlights || charFindings.length === 0) {
+      return renderSliceWithMatches(0, sourceText.length, "full");
+    }
+
+    const elements: React.ReactNode[] = [];
+    let paraCursor = 0;
+
+    charFindings.forEach((f, idx) => {
+      const fStart = Math.max(f.start, paraCursor);
+      const fEnd = Math.min(f.end, sourceText.length);
+      if (fEnd <= fStart) return;
+
+      if (fStart > paraCursor) {
+        elements.push(
+          renderSliceWithMatches(paraCursor, fStart, `before-p-${idx}`)
+        );
+      }
+
+      const isFocused = focusedParaIndex === f.paragraph_index;
 
       elements.push(
-        <mark
-          key={`m-${idx}`}
-          className={`highlight-chip${ignored ? " ignored" : ""}`}
-          style={{
-            backgroundColor: ignored
-              ? "transparent"
-              : COLORS[m.label] || "#94a3b8",
-          }}
-          onClick={() => toggleIgnored(key)}
-          title={
-            ignored
-              ? "Klicka för att maskera igen"
-              : "Klicka för att undanta/avmaskera"
-          }
+        <div
+          key={`para-${f.paragraph_index}`}
+          id={`finding-para-${f.paragraph_index}`}
+          className={`flagged-para-block severity-${f.severity}${
+            isFocused ? " focused" : ""
+          }`}
         >
-          {sourceText.slice(m.start, m.end)}
-          {!ignored && <span className="entity-tag">[{masked}]</span>}
-        </mark>
+          <div className="flagged-para-header">
+            <span className="flagged-para-title">
+              <AlertTriangle size={13} aria-hidden="true" />
+              <span>
+                Avsnitt {f.paragraph_index} · {f.category}
+              </span>
+            </span>
+            <span className="flagged-para-meta">
+              <span className="flagged-para-conf">
+                {Math.round(f.confidence * 100)}% träffsäkerhet
+              </span>
+              <span className="flagged-para-reason">{f.reason}</span>
+            </span>
+          </div>
+          <div className="flagged-para-body">
+            {renderSliceWithMatches(fStart, fEnd, `in-p-${idx}`)}
+          </div>
+        </div>
       );
-      lastIndex = m.end;
+
+      paraCursor = fEnd;
     });
 
-    if (lastIndex < sourceText.length) {
-      elements.push(<span key="tail">{sourceText.slice(lastIndex)}</span>);
+    if (paraCursor < sourceText.length) {
+      elements.push(
+        renderSliceWithMatches(paraCursor, sourceText.length, "after-all")
+      );
     }
 
     return elements;
-  }, [sourceText, matches, ignoredKeys, activeTranslationTable, toggleIgnored]);
+  }, [
+    sourceText,
+    showParaHighlights,
+    charFindings,
+    focusedParaIndex,
+    renderSliceWithMatches,
+  ]);
 
   // Traffic light helpers
   const verdictBadge = (verdict: SafetyVerdict | undefined) => {
@@ -1095,7 +1249,12 @@ export default function App() {
                   </div>
                   <ul className="findings-list">
                     {report.findings.map((f, i) => (
-                      <li key={i} className={`finding-item ${f.severity}`}>
+                      <li
+                        key={i}
+                        className={`finding-item ${f.severity} clickable`}
+                        onClick={() => handleJumpToParagraph(f.paragraph_index)}
+                        title="Klicka för att hoppa till det markerade stycket i texten"
+                      >
                         <span className="finding-category">
                           Avsnitt {f.paragraph_index} · {f.category}
                         </span>
@@ -1103,7 +1262,7 @@ export default function App() {
                           {Math.round(f.confidence * 100)}% träffsäkerhet
                         </span>
                         <span className="finding-preview">”{f.preview}”</span>
-                        <span className="finding-reason">{f.reason}</span>
+                        <span className="finding-jump-link">Visa i text →</span>
                       </li>
                     ))}
                   </ul>
@@ -1207,7 +1366,7 @@ export default function App() {
           className="tab-panel"
         >
           <div className="panel-inner">
-            {isEditing || !matches.length ? (
+            {isEditing || (!matches.length && !charFindings.length && !hasAnalyzed) ? (
               <div
                 className={`textarea-wrapper ${isDragOver ? "dragover" : ""}`}
                 onDragOver={(e) => {
@@ -1261,16 +1420,34 @@ export default function App() {
               <div className="review-viewer-wrapper">
                 <div className="review-viewer-header">
                   <span>
-                    Visar granskningsvy ({activeMatches.length} aktiva maskeringar ·
-                    klicka på ett markerat ord för att undanta/avmaskera):
+                    Visar granskningsvy ({activeMatches.length} aktiva maskeringar
+                    {charFindings.length > 0 &&
+                      ` · ${charFindings.length} känsliga avsnitt markerade`}
+                    {" · "}klicka på ett markerat ord för att undanta/avmaskera):
                   </span>
-                  <button
-                    type="button"
-                    className="tb-btn-subtle"
-                    onClick={() => setIsEditing(true)}
-                  >
-                    Ändra källtext
-                  </button>
+                  <div className="review-header-actions">
+                    {charFindings.length > 0 && (
+                      <button
+                        type="button"
+                        className="tb-preset-btn para-toggle-btn"
+                        aria-pressed={showParaHighlights}
+                        onClick={() => setShowParaHighlights((v) => !v)}
+                        title="Visa eller dölj utmärkning av känsliga stycken i texten"
+                      >
+                        <AlertTriangle size={13} aria-hidden="true" />
+                        <span>
+                          Markera känsliga stycken ({charFindings.length})
+                        </span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="tb-btn-subtle"
+                      onClick={() => setIsEditing(true)}
+                    >
+                      Ändra källtext
+                    </button>
+                  </div>
                 </div>
                 <div className="review-viewer-content">{renderedReviewText}</div>
               </div>

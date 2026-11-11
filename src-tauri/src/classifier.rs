@@ -329,13 +329,14 @@ impl EmbeddingClassifier {
 
     pub fn scan_paragraphs_with_progress<F>(
         &self,
+        original_text: &str,
         masked_text: &str,
         on_progress: F,
     ) -> (Vec<ParagraphFinding>, usize)
     where
         F: FnMut(usize, usize),
     {
-        let paragraphs = split_paragraphs(masked_text);
+        let paragraphs = split_paragraphs_paired(original_text, masked_text);
         if paragraphs.is_empty() {
             return (vec![], 0);
         }
@@ -406,6 +407,134 @@ impl EmbeddingClassifier {
 
         (findings, total_paras)
     }
+}
+
+fn raw_double_newline_blocks(text: &str) -> Vec<(usize, usize)> {
+    let mut blocks = Vec::new();
+    let mut start = 0usize;
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        let is_break = bytes[i] == b'\n' && (i + 1 < bytes.len() && bytes[i + 1] == b'\n');
+        if is_break {
+            if let Some(span) = trimmed_span(text, start, i) {
+                blocks.push(span);
+            }
+            while i < bytes.len() && bytes[i] == b'\n' {
+                i += 1;
+            }
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    if start < bytes.len() {
+        if let Some(span) = trimmed_span(text, start, bytes.len()) {
+            blocks.push(span);
+        }
+    }
+    blocks
+}
+
+fn trimmed_span(full: &str, start: usize, end: usize) -> Option<(usize, usize)> {
+    let raw = &full[start..end];
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let trim_offset = raw.len() - raw.trim_start().len();
+    let p_start = start + trim_offset;
+    let p_end = p_start + trimmed.len();
+    Some((p_start, p_end))
+}
+
+/// Delar upp `masked_text` i avsnitt för EmbeddingGemma 2 samtidigt som varje avsnitts
+/// exakta byte-intervall `(orig_start, orig_end)` i `original_text` bevaras för UI-markering.
+fn split_paragraphs_paired<'a>(
+    original_text: &'a str,
+    masked_text: &'a str,
+) -> Vec<(usize, usize, &'a str)> {
+    let orig_blocks = raw_double_newline_blocks(original_text);
+    let mask_blocks = raw_double_newline_blocks(masked_text);
+
+    if original_text.is_empty() || orig_blocks.len() != mask_blocks.len() {
+        return split_paragraphs(masked_text);
+    }
+
+    let mut raw_paired: Vec<(usize, usize, usize, usize)> = Vec::new();
+    for ((o_start, o_end), (m_start, m_end)) in orig_blocks.into_iter().zip(mask_blocks) {
+        let m_trimmed = masked_text[m_start..m_end].trim();
+        let o_trimmed = original_text[o_start..o_end].trim();
+        if m_trimmed.chars().count() < MIN_PARAGRAPH_CHARS
+            && o_trimmed.chars().count() < MIN_PARAGRAPH_CHARS
+        {
+            continue;
+        }
+        if m_trimmed.chars().count() <= MAX_PARAGRAPH_CHARS {
+            raw_paired.push((o_start, o_end, m_start, m_end));
+        } else {
+            // Vid mycket långa stycken delas de upp längs meningsgränser
+            let m_subs = split_long_span(masked_text, m_start, m_end);
+            let o_subs = split_long_span(original_text, o_start, o_end);
+            if m_subs.len() == o_subs.len() {
+                for ((os, oe), (ms, me)) in o_subs.into_iter().zip(m_subs) {
+                    raw_paired.push((os, oe, ms, me));
+                }
+            } else {
+                raw_paired.push((o_start, o_end, m_start, m_end));
+            }
+        }
+    }
+
+    let mut merged: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(raw_paired.len());
+    for (o_start, o_end, m_start, m_end) in raw_paired {
+        if let Some((_, prev_o_end, prev_m_start, prev_m_end)) = merged.last_mut() {
+            let prev_chars = masked_text[*prev_m_start..*prev_m_end].chars().count();
+            let curr_chars = masked_text[m_start..m_end].chars().count();
+            if (prev_chars < 140 || curr_chars < 95)
+                && (prev_chars + curr_chars <= MERGE_TARGET_CHARS)
+            {
+                *prev_o_end = o_end;
+                *prev_m_end = m_end;
+                continue;
+            }
+        }
+        merged.push((o_start, o_end, m_start, m_end));
+    }
+
+    merged
+        .into_iter()
+        .map(|(o_start, o_end, m_start, m_end)| {
+            (o_start, o_end, masked_text[m_start..m_end].trim())
+        })
+        .collect()
+}
+
+fn split_long_span(full: &str, p_start: usize, p_end: usize) -> Vec<(usize, usize)> {
+    let trimmed = &full[p_start..p_end];
+    let mut out = Vec::new();
+    let mut sub_start_byte = 0usize;
+    let mut count = 0usize;
+    for (b_idx, ch) in trimmed.char_indices() {
+        count += 1;
+        if count >= MAX_PARAGRAPH_CHARS && (ch == '.' || ch == '\n') {
+            let next_b = b_idx + ch.len_utf8();
+            let sub = trimmed[sub_start_byte..next_b].trim();
+            if sub.chars().count() >= MIN_PARAGRAPH_CHARS {
+                out.push((p_start + sub_start_byte, p_start + next_b));
+            }
+            sub_start_byte = next_b;
+            count = 0;
+        }
+    }
+    if sub_start_byte < trimmed.len() {
+        let sub = trimmed[sub_start_byte..].trim();
+        if sub.chars().count() >= MIN_PARAGRAPH_CHARS {
+            out.push((p_start + sub_start_byte, p_end));
+        }
+    }
+    out
 }
 
 fn split_paragraphs(text: &str) -> Vec<(usize, usize, &str)> {
@@ -620,7 +749,7 @@ Inför styrelsemötet föreslår vi att lägga ett konfidentiellt bud om 145 MSE
 Vid gårdagens säkerhetsgranskning upptäcktes en kritisk SQL-injektion i den interna autentiseringstjänsten bakom brandväggen som ger obehörig läsbehörighet till kunddatabasen.\n\n\
 Tack för mötet igår [PERSON B]! Här är en kort sammanfattning av de publika riktlinjerna från Boverket som vi kan ha som underlag till den öppna presentationen nästa månad.";
 
-        let (findings, scanned) = clf.scan_paragraphs_with_progress(sample, |_, _| {});
+        let (findings, scanned) = clf.scan_paragraphs_with_progress(sample, sample, |_, _| {});
         assert_eq!(scanned, 5);
         assert_eq!(findings.len(), 3, "Exakt de 3 känsliga styckena ska flaggas");
         assert_eq!(findings[0].paragraph_index, 2);
@@ -632,6 +761,21 @@ Tack för mötet igår [PERSON B]! Här är en kort sammanfattning av de publika
         assert_eq!(findings[2].paragraph_index, 4);
         assert_eq!(findings[2].axis, "säkerhet");
         assert_eq!(findings[2].severity, "high");
+
+        let siths_orig = "\
+Hej!\n\n\
+Ditt SITHS eID (certifikat) på ditt SITHS-kort nr.  9752267235710527661 med utgångsdatum 2027-01-04 kommer att upphöra om 60 dagar.\n\n\
+Kortets giltighetstid står angiven på framsidan av kortet men SITHS eID (certifikatet) kan ha ett annat datum, se ovan.\n\n\
+Har du SITHS reservkort eller SITHS konsultkort?\n\n\
+Om du ska förnya/förlänga SITHS reservkort, konsultkort eller SITHS eID (certifikat) på någon av dessa två korttyper, kontakta din korthandläggare på din arbetsplats.\n\n\
+Har du ett ordinarie SITHS-kort (med foto)?\n\n\
+Då ska du förnya ditt ordinarie SITHS-kort (med foto) genom att boka tid till ett av regionens tre ID-fotokontor. Mer information och bokning hittar du på regionens intranät: https://intranat.rjl.se/service-och-stod-i-arbetet/lokaler-flytt-och-id/lokaler-flytt-och-id/bestalla-fota-och-hamta-ut-siths-kort/?pageId=49904&blockId=58111\n\n\
+Observera att det tar cirka två veckor från att kortet har beställts av ID-fotokontoret tills du kan aktivera det.\n\n\
+Boka tid så snart som möjligt för fotografering.\n\n\
+Detta e-postmeddelande kan inte besvaras.\n\n\
+Vänliga hälsningar\n\
+SITHS-förvaltningen\n\
+Region Jönköpings län";
 
         let siths = "\
 Hej!\n\n\
@@ -648,18 +792,35 @@ Vänliga hälsningar\n\
 [ORGANISATION A]\n\
 [ORGANISATION B]";
 
-        let (siths_findings, siths_scanned) = clf.scan_paragraphs_with_progress(siths, |_, _| {});
+        let (siths_findings, siths_scanned) =
+            clf.scan_paragraphs_with_progress(siths_orig, siths, |_, _| {});
         println!("SITHS ihopslagna block: {siths_scanned}, flaggade: {}", siths_findings.len());
         for f in &siths_findings {
+            let orig_slice = &siths_orig[f.start..f.end];
+            assert!(!orig_slice.is_empty());
             println!(
-                "  Block {}: {} ({}, {:.0}%) => {}",
+                "  Block {}: {} ({}, {:.0}%) [{}..{}] => {}",
                 f.paragraph_index,
                 f.category,
                 f.severity,
                 f.confidence * 100.0,
+                f.start,
+                f.end,
                 f.preview
             );
         }
+        assert!(
+            siths_findings
+                .iter()
+                .any(|f| siths_orig[f.start..f.end].contains("9752267235710527661")),
+            "Original-offset ska peka på stycket med SITHS-kortnumret"
+        );
+        assert!(
+            siths_findings
+                .iter()
+                .any(|f| siths_orig[f.start..f.end].contains("https://intranat.rjl.se/")),
+            "Original-offset ska peka på stycket med intranätlänken"
+        );
         assert!(
             !siths_findings.is_empty() && siths_findings.iter().any(|f| f.severity == "high"),
             "SITHS-meddelandet ska flaggas som hög känslighet under säkerhet/eID"

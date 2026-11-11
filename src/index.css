@@ -603,6 +603,25 @@ body {
   align-items: baseline;
   gap: 0.45rem;
   line-height: 1.3;
+  padding: 0.2rem 0.4rem;
+  border-radius: 5px;
+  transition: background-color 0.15s ease;
+}
+
+.finding-item.clickable {
+  cursor: pointer;
+}
+
+.finding-item.clickable:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.finding-jump-link {
+  margin-left: auto;
+  color: #a5b4fc;
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .finding-category {
@@ -822,11 +841,115 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 0.75rem;
   padding: 0.4rem 0.75rem;
   background: #0f172a;
   border-bottom: 1px solid var(--border-subtle);
   font-size: 0.78rem;
   color: var(--text-secondary);
+}
+
+.review-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.para-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.74rem;
+  padding: 0.2rem 0.55rem;
+  min-height: 24px;
+}
+
+.para-toggle-btn[aria-pressed="true"] {
+  background: rgba(239, 68, 68, 0.16);
+  border-color: rgba(248, 113, 113, 0.45);
+  color: #fecaca;
+}
+
+/* ── Markerade känsliga stycken i granskningsvyn (Lager 3) ── */
+.flagged-para-block {
+  margin: 0.55rem 0;
+  border-radius: 8px;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  border-left: 4px solid #ef4444;
+  background: rgba(239, 68, 68, 0.08);
+  overflow: hidden;
+  transition: box-shadow 0.25s ease, border-color 0.25s ease;
+}
+
+.flagged-para-block.severity-medium {
+  border-color: rgba(245, 158, 11, 0.4);
+  border-left-color: #f59e0b;
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.flagged-para-block.focused {
+  border-color: #818cf8;
+  box-shadow: 0 0 0 3px rgba(129, 140, 248, 0.45);
+}
+
+.flagged-para-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.3rem 0.65rem;
+  background: rgba(15, 23, 42, 0.65);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 0.74rem;
+  line-height: 1.3;
+  white-space: normal;
+}
+
+.flagged-para-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-weight: 700;
+  color: #fca5a5;
+}
+
+.flagged-para-block.severity-medium .flagged-para-title {
+  color: #fcd34d;
+}
+
+.flagged-para-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.flagged-para-conf {
+  background: rgba(248, 113, 113, 0.18);
+  color: #fecaca;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: 4px;
+  padding: 0.05rem 0.35rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.flagged-para-block.severity-medium .flagged-para-conf {
+  background: rgba(245, 158, 11, 0.18);
+  color: #fde68a;
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+.flagged-para-reason {
+  color: var(--text-secondary);
+  font-size: 0.71rem;
+}
+
+.flagged-para-body {
+  padding: 0.55rem 0.75rem;
+  white-space: pre-wrap;
 }
 
 .tb-btn-subtle {

@@ -448,7 +448,7 @@ async fn load_gemma(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn classify_document(
-    _original_text: String,
+    original_text: String,
     masked_text: String,
     active_pii_count: usize,
     unmasked_pii_count: usize,
@@ -471,10 +471,13 @@ async fn classify_document(
                 )
             } else if let Some(clf) = CLASSIFIER.get() {
                 let t0 = std::time::Instant::now();
-                let (found, total_paras) =
-                    clf.scan_paragraphs_with_progress(&masked_text, |chunk, total| {
+                let (found, total_paras) = clf.scan_paragraphs_with_progress(
+                    &original_text,
+                    &masked_text,
+                    |chunk, total| {
                         let _ = app.emit("gemma_scan_progress", NerProgress { chunk, total });
-                    });
+                    },
+                );
                 let ms = t0.elapsed().as_millis() as u64;
                 (found, total_paras, ms)
             } else {
