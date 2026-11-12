@@ -69,6 +69,7 @@ const REGEX_LABELS = [
 
 const ENTITY_LABELS = [
   "Person",
+  "Roll/Titel",
   "Organisation",
   "Plats",
   "Övrigt",
@@ -126,6 +127,7 @@ const COLORS: Record<string, string> = {
   Kortnummer: "#991b1b",
   "Hemlighet/Nyckel": "#9f1239",
   Person: "#5b21b6",
+  "Roll/Titel": "#3730a3",
   Organisation: "#047857",
   Plats: "#9d174d",
   Övrigt: "#475569",
@@ -795,17 +797,56 @@ export default function App() {
     return counts;
   }, [activeMatches]);
 
+  // Uppdatera aktiva träffar direkt om användaren växlar profil eller kategori (t.ex. Roll/Titel) efter analys
+  const refreshMatchesForEntities = useCallback(
+    async (nextEntities: string[]) => {
+      if (!hasAnalyzed || !sourceText.trim() || analyzing || classifying) {
+        return;
+      }
+      try {
+        const raw = await invoke<Match[]>("analyze_text", {
+          text: sourceText,
+          entities: nextEntities,
+          threshold,
+        });
+        const scanned = fixByteOffsets(sourceText, raw);
+        setMatches((prev) => {
+          const manuals = prev.filter((m) => m.source === "manuell");
+          const combined = [...scanned, ...manuals].sort(
+            (a, b) => a.start - b.start || b.end - a.end
+          );
+          const deduped: Match[] = [];
+          let lastEnd = -1;
+          for (const m of combined) {
+            if (m.start >= lastEnd) {
+              deduped.push(m);
+              lastEnd = m.end;
+            }
+          }
+          return deduped;
+        });
+      } catch (err) {
+        console.error("Kunde inte uppdatera kategorifilter:", err);
+      }
+    },
+    [hasAnalyzed, sourceText, analyzing, classifying, threshold]
+  );
+
   // Hantera preset-byte
   const handleSelectPreset = (key: PresetKey) => {
+    const nextEntities = [...PRESETS[key].entities];
     setActivePreset(key);
-    setSelectedEntities([...PRESETS[key].entities]);
+    setSelectedEntities(nextEntities);
+    void refreshMatchesForEntities(nextEntities);
   };
 
   const toggleCategory = (cat: string) => {
+    const nextEntities = selectedEntities.includes(cat)
+      ? selectedEntities.filter((c) => c !== cat)
+      : [...selectedEntities, cat];
     setActivePreset(null);
-    setSelectedEntities((prev) =>
-      prev.includes(cat) ? prev.filter((c) => c !== cat) : [...prev, cat]
-    );
+    setSelectedEntities(nextEntities);
+    void refreshMatchesForEntities(nextEntities);
   };
 
   // Sömlös redigering av källtext som bevarar alla befintliga maskeringar genom offset-justering
@@ -1284,10 +1325,16 @@ export default function App() {
 
     const replacements: ReplacementPair[] = [
       ...activeTranslationTable.values(),
-    ].map((entry) => ({
-      original: entry.originalText,
-      replacement: `[${entry.maskedLabel.toUpperCase()}]`,
-    }));
+    ]
+      .flatMap((entry) => {
+        const replacement = `[${entry.maskedLabel.toUpperCase()}]`;
+        const forms =
+          entry.variants && entry.variants.length > 0
+            ? entry.variants
+            : [entry.originalText];
+        return forms.map((original) => ({ original, replacement }));
+      })
+      .sort((a, b) => b.original.length - a.original.length);
 
     try {
       await invoke("export_masked_docx", {
@@ -1314,10 +1361,16 @@ export default function App() {
 
     const replacements: ReplacementPair[] = [
       ...activeTranslationTable.values(),
-    ].map((entry) => ({
-      original: entry.originalText,
-      replacement: `[${entry.maskedLabel.toUpperCase()}]`,
-    }));
+    ]
+      .flatMap((entry) => {
+        const replacement = `[${entry.maskedLabel.toUpperCase()}]`;
+        const forms =
+          entry.variants && entry.variants.length > 0
+            ? entry.variants
+            : [entry.originalText];
+        return forms.map((original) => ({ original, replacement }));
+      })
+      .sort((a, b) => b.original.length - a.original.length);
 
     try {
       await invoke("export_masked_xlsx", {
@@ -3482,6 +3535,15 @@ export default function App() {
               {PRESETS[key].name}
             </button>
           ))}
+          <button
+            type="button"
+            className="tb-preset-btn tb-filter-btn"
+            aria-pressed={selectedEntities.includes("Roll/Titel")}
+            onClick={() => toggleCategory("Roll/Titel")}
+            title="Maskera även yrkestitlar och befattningar som kvasidentifierare (t.ex. verksamhetschef → [ROLL A])"
+          >
+            <span>+ Roll/Titel</span>
+          </button>
           <button
             type="button"
             className="tb-preset-btn tb-filter-btn"

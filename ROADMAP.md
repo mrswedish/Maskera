@@ -21,9 +21,9 @@ I kommunal och regional verksamhet fungerar dock smala befattningar ofta som **i
 
 ### Möjliga genomförandesteg
 
-- **Steg 1A — Svensk sammansättnings- och ordlistemotor i Lager 1 (Snabbvinst, 0 MB extra, < 1 ms):**
-  - Utnyttja svenskans regelbundna ordbildning genom att matcha vanliga befattningsefterled (`-chef`, `-samordnare`, `-läkare`, `-sköterska`, `-handläggare`, `-direktör`, `-rektor`, `-kurator`, `-psykolog`, `-sekreterare`, `-ansvarig`, `-ledare` m.fl. i obestämd/bestämd form) kombinerat med en kurerad lista på grundyrken (*läkare*, *jurist*, *ekonom* m.fl.).
-  - Fångar automatiskt även nya sammansättningar (t.ex. *informationssäkerhetssamordnare* eller *biträdande verksamhetschef*) och exponeras som en valbar filterknapp i verktygsraden (`Roll/Titel` → `[ROLL A]`), exempelvis aktiv i profilen **Strikt**.
+- **Steg 1A — Svensk sammansättnings- och ordlistemotor i Lager 1 (✅ Klar — 0 MB extra, < 1 ms):**
+  - Utnyttjar svenskans regelbundna ordbildning i `src-tauri/src/roles.rs` genom att matcha vanliga befattningsefterled (`-chef`, `-samordnare`, `-läkare`, `-sköterska`, `-handläggare`, `-direktör`, `-rektor`, `-kurator`, `-psykolog`, `-sekreterare`, `-ansvarig`, `-ledare` m.fl. i obestämd/bestämd form, plural och genitiv) kombinerat med kurerad basordlista, flerordsfraser och förställda attribut (*biträdande*, *tf.*, *vård- och omsorgschef* m.fl.) samt undantagsfilter mot falska vänner.
+  - Exponeras som en direkt snabbknapp i verktygsraden (`+ Roll/Titel` → `[ROLL A]`) i Läge 1 (*Avidentifiera för AI*), valbar i *Filter* och förvalt aktiv i profilen **Strikt (Allt)**.
 - **Steg 1B — Finjusterad svensk NER-modell med egen `TITEL/ROLL`-klass:**
   - Finjustera grundmodellen `KB/bert-base-swedish-cased` på svensk korpus med uppmärkta yrkesroller/titlar (t.ex. *Swe-NERC* kombinerat med syntetiska exempel från vård, skola, kollektivtrafik och förvaltning) och exportera till kvantiserad INT8 ONNX (~121 MB).
   - Ger full meningskontext utan att öka modellstorleken eller sänka hastigheten jämfört med dagens Lager 2.
@@ -107,6 +107,6 @@ Eftersom klassificeringsmotorn (`src-tauri/src/info_classification.rs`) är frik
 |---|---|---|---|
 | **Etapp 1** | **Lager 4 (`Gemma 4 E2B` Judge i *Klassificera information*):** Valbar lokal helhetsbedömning (`llama.cpp` / `GGUF` QAT Q4_K_XL, ~2,62 GB) med tratt-arkitektur, varm KV-cache för systemprompt, förifylld kompakt JSON utan GBNF-overhead, Lager 1-vetorätt och en-klicks avinstallation | ✅ **Klar i v0.6.0+** | Löser kontextfällan i Lager 3 (skiljer t.ex. kursreferat/rutin från skarpt ärende) |
 | **Etapp 2** | **Externa klassningsprofiler (JSON):** Konfigurerbara gröna/gula/röda typexempel och lagringsanvisningar utan omkompilering | Låg | Superanvändare/infosäk kan kalibrera exempel löpande |
-| **Etapp 3** | **Titlar & roller (Steg 1A):** Svensk sammansättnings- och ordlistemotor i Lager 1 + valbart filter `Roll/Titel` (`[ROLL A]`) | Låg–Medel | Skyddar mot bakvägsidentifiering via unika befattningar (0 MB extra) |
+| **Etapp 3** | **Titlar & roller (Steg 1A):** Svensk sammansättnings- och ordlistemotor i Lager 1 + valbart filter `+ Roll/Titel` (`[ROLL A]`) | ✅ **Klar** | Skyddar mot bakvägsidentifiering via unika befattningar (0 MB extra, < 1 ms) |
 | **Etapp 4** | **Finjusterad BERT (`Steg 1B`) & ev. Server-API:** Kontexthantering av roller i Lager 2 samt möjlighet att köra `info_classification` + större `Gemma 4`-modell som central intern servertjänst | Medel–Hög | Skalbar organisationslösning med noll klientunderhåll för klassificering |
 

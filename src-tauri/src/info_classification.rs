@@ -423,11 +423,21 @@ fn is_heading_or_keyword_stack(raw_slice: &str, clean_slice: &str) -> bool {
 
 /// Avgör om en `Konto/Giro`-träff avser ett personligt bankkonto/IBAN (Röd) eller ett giro i publik kontext.
 fn classify_account_matches(text: &str, structural_matches: &[Match]) -> (usize, usize) {
-    let mut red_bank_accounts = RE_PERSONAL_BANK_ACCOUNT.find_iter(text).count();
+    let personal_spans: Vec<(usize, usize)> = RE_PERSONAL_BANK_ACCOUNT
+        .find_iter(text)
+        .map(|m| (m.start(), m.end()))
+        .collect();
+    let mut red_bank_accounts = personal_spans.len();
     let mut yellow_giro = 0usize;
 
     for m in structural_matches {
         if m.label != "Konto/Giro" {
+            continue;
+        }
+        if personal_spans
+            .iter()
+            .any(|&(s, e)| !(m.end <= s || m.start >= e))
+        {
             continue;
         }
         let upper = m.text.trim().to_ascii_uppercase();

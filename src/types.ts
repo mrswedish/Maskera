@@ -10,6 +10,7 @@ export interface TranslationEntry {
   maskedLabel: string;
   label: string;
   originalText: string;
+  variants?: string[];
   positions: Array<{ start: number; end: number }>;
   count: number;
 }

@@ -1,18 +1,19 @@
 import type { Match, TranslationEntry, TranslationTable } from "./types";
 
-// NER-entiteter (kblab) får bokstavssuffix: "Person A", "Person B"…
+// NER- och roll-entiteter får bokstavssuffix: "Person A", "Roll A"…
 // Regex- och manuella entiteter får numeriskt suffix: "Personnummer 1", "E-post 2"…
 function maskedLabel(label: string, source: string, counter: number): string {
+  const baseLabel = label === "Roll/Titel" ? "Roll" : label;
   if (source === "regex" || source === "manuell") {
-    return `${label} ${counter}`;
+    return `${baseLabel} ${counter}`;
   }
   // Bokstav A–Z, sedan AA, AB… (upp till 702 unika värden)
   if (counter <= 26) {
-    return `${label} ${String.fromCharCode(64 + counter)}`;
+    return `${baseLabel} ${String.fromCharCode(64 + counter)}`;
   }
   const first = String.fromCharCode(64 + Math.floor((counter - 1) / 26));
   const second = String.fromCharCode(64 + ((counter - 1) % 26) + 1);
-  return `${label} ${first}${second}`;
+  return `${baseLabel} ${first}${second}`;
 }
 
 export function buildTranslationTable(matches: Match[]): TranslationTable {
@@ -20,10 +21,25 @@ export function buildTranslationTable(matches: Match[]): TranslationTable {
   const counters = new Map<string, number>();
 
   for (const m of matches) {
-    if (table.has(m.text)) {
-      const entry = table.get(m.text)!;
+    // För yrkesroller slås meningsinledande versal ("Verksamhetschefen") och gemen
+    // ("verksamhetschefen") ihop till samma [ROLL A] så AI:n ser att det är samma roll.
+    const lookupKey =
+      m.label === "Roll/Titel" ? `role:${m.text.toLowerCase()}` : m.text;
+
+    if (table.has(lookupKey)) {
+      const entry = table.get(lookupKey)!;
       entry.positions.push({ start: m.start, end: m.end });
       entry.count += 1;
+      if (!entry.variants) {
+        entry.variants = [entry.originalText];
+      }
+      if (!entry.variants.includes(m.text)) {
+        entry.variants.push(m.text);
+      }
+      // Föredra gemen grundform vid avmaskering om ordet inte är en förkortning (t.ex. IT-chef / VD)
+      if (m.label === "Roll/Titel" && m.text === m.text.toLowerCase()) {
+        entry.originalText = m.text;
+      }
     } else {
       const counterKey = `${m.label}|${m.source}`;
       const next = (counters.get(counterKey) ?? 0) + 1;
@@ -33,10 +49,11 @@ export function buildTranslationTable(matches: Match[]): TranslationTable {
         maskedLabel: maskedLabel(m.label, m.source, next),
         label: m.label,
         originalText: m.text,
+        variants: [m.text],
         positions: [{ start: m.start, end: m.end }],
         count: 1,
       };
-      table.set(m.text, entry);
+      table.set(lookupKey, entry);
     }
   }
 
