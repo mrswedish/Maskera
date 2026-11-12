@@ -61,3 +61,21 @@ export interface ReplacementPair {
   original: string;
   replacement: string;
 }
+
+export interface ModelsStatus {
+  nerInstalled: boolean;
+  gemmaInstalled: boolean;
+  nerReady: boolean;
+  gemmaReady: boolean;
+}
+
+export interface SetupProgress {
+  phase: "downloading" | "copying" | "loading" | "ready";
+  step: number;
+  totalSteps: number;
+  nerDone: boolean;
+  gemmaDone: boolean;
+  label: string;
+  downloadedBytes: number;
+  totalBytes: number;
+}

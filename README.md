@@ -15,7 +15,7 @@ Maskera är ett snabbt, helt lokalt skrivbordsverktyg för automatisk identifier
 ### 3. Återställ (avmaskera) AI-svar med dokumentformatering (Mörkt tema)
 ![Maskera vy för att avmaskera AI-svar i mörkt tema med formaterad förhandsvisning redo för Word och Outlook](docs/screenshots/maskera-avmaskera-dark.png)
 
-> **Interaktiv HTML-förhandsvisning:** Filen [`docs/screenshots/maskera-ui-demo.html`](docs/screenshots/maskera-ui-demo.html) är en fristående HTML-dump som använder applikationens faktiska stilmall (`src/index.css`) och kan öppnas direkt i en webbläsare (även med `?view=empty`, `?view=mask`, `?view=table` eller `?view=unmask`) för att testa vyerna samt växla mellan **Ljust** och **Mörkt** tema.
+> **Interaktiv HTML-förhandsvisning:** Filen [`docs/screenshots/maskera-ui-demo.html`](docs/screenshots/maskera-ui-demo.html) är en fristående HTML-dump som använder applikationens faktiska stilmall (`src/index.css`) och kan öppnas direkt i en webbläsare (med `?view=setup`, `?view=empty`, `?view=mask`, `?view=table` eller `?view=unmask`) för att testa vyerna samt växla mellan **Ljust** och **Mörkt** tema.
 
 ---
 
@@ -106,10 +106,13 @@ Tauri 2-app (Rust-shell + WebView)
               └── Dokumentmotor: Portabel läsning & formateringsbevarande export (.docx, .xlsx, .pdf, .odt, .ods)
 ```
 
-### Modeller & lokal lagring
+### Modeller & lokal lagring (engångsnedladdning eller offline-mapp)
 
-- **Lager 2 (BERT NER, ~120 MB):** [`psvensk/bert-base-swedish-cased-ner-onnx`](https://huggingface.co/psvensk/bert-base-swedish-cased-ner-onnx) laddas ner automatiskt vid första start.
-- **Lager 3 (EmbeddingGemma 2, ~197 MB):** [`onnx-community/embeddinggemma-300m-ONNX`](https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX) (`model_q4.onnx`) hämtas med ett klick inifrån appen och cachas i användarens lokala appdata-mapp.
+Vid **första starten** kontrollerar Maskera om båda AI-modellerna finns lokalt. Om någon saknas visas en **välkomst- och installationsvy med gemensam förloppsindikator (`<progress>`)** som laddar ner och initierar båda modellerna i ett svep (~318 MB totalt). Vid alla efterföljande starter öppnas editorn direkt utan väntetid:
+
+- **Lager 2 (Svensk BERT NER, ~121 MB):** [`psvensk/bert-base-swedish-cased-ner-onnx`](https://huggingface.co/psvensk/bert-base-swedish-cased-ner-onnx)
+- **Lager 3 (EmbeddingGemma 2, ~197 MB):** [`onnx-community/embeddinggemma-300m-ONNX`](https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX) (`model_q4.onnx`)
+- **Portabel / offline-installation:** Modellerna cachas i användarens lokala appdata-mapp, men kan även läggas i en `models/`-mapp bredvid `Maskera-portabel.exe` eller väljas från valfri mapp/USB-sticka via knappen **Välj lokal modellmapp…** om datorn saknar internetåtkomst.
 
 ---
 

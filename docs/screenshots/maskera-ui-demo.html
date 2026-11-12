@@ -9,6 +9,9 @@
     <link rel="stylesheet" href="../../src/index.css" />
     <style>
       svg[hidden],
+      .action-toolbar[hidden],
+      .main-workspace[hidden],
+      .setup-workspace[hidden],
       .panel-inner[hidden],
       .gatekeeper-banner[hidden],
       .tab-badge[hidden] {
@@ -44,8 +47,8 @@
         </div>
 
         <div class="header-status-pills">
-          <span class="status-pill ready" title="BERT NER: Aktiv · EmbeddingGemma 2: Aktiv">
-            <span>Lokal AI redo</span>
+          <span class="status-pill ready" id="header-ai-pill" title="BERT NER: Aktiv · EmbeddingGemma 2: Aktiv">
+            <span id="header-ai-label">Lokal AI redo</span>
           </span>
 
           <button type="button" class="theme-toggle-btn" id="theme-toggle">
@@ -61,8 +64,89 @@
         </div>
       </header>
 
+      <!-- Förstagångsinstallation (?view=setup) -->
+      <main class="setup-workspace" id="setup-workspace" hidden>
+        <section class="setup-card" aria-labelledby="setup-heading">
+          <div class="setup-card-header">
+            <div class="setup-icon-badge" aria-hidden="true">
+              <svg aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z" />
+              </svg>
+            </div>
+            <div class="setup-title-group">
+              <h2 id="setup-heading" class="setup-title">Förbereder lokal AI — engångsnedladdning</h2>
+              <p class="setup-subtitle">
+                Maskera hämtar nu språk- och kontextmodellerna (~318 MB totalt) en enda gång till din dator. Därefter körs all avidentifiering och säkerhetskontroll <strong>100 % lokalt och offline</strong> — ingen text lämnar någonsin din dator.
+              </p>
+            </div>
+          </div>
+
+          <ul class="setup-model-list" role="list">
+            <li class="setup-model-item done">
+              <div class="setup-model-info">
+                <div class="setup-model-name-row">
+                  <strong>1. Svensk BERT NER</strong>
+                  <span class="setup-model-size">~121 MB</span>
+                </div>
+                <p class="setup-model-desc">
+                  Hittar personnamn, organisationer, platser, tider och händelser i svensk löptext (KBLab/Kungliga biblioteket).
+                </p>
+              </div>
+              <span class="setup-step-pill done">
+                <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M20 6 9 17l-5-5" />
+                </svg>
+                <span>Klar</span>
+              </span>
+            </li>
+
+            <li class="setup-model-item active">
+              <div class="setup-model-info">
+                <div class="setup-model-name-row">
+                  <strong>2. EmbeddingGemma 2</strong>
+                  <span class="setup-model-size">~197 MB</span>
+                </div>
+                <p class="setup-model-desc">
+                  Semantisk säkerhetskontroll som varnar för patient-/vårduppgifter, företagshemligheter, sårbarheter och HR-ärenden.
+                </p>
+              </div>
+              <span class="setup-step-pill active">
+                <svg class="spin" aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                </svg>
+                <span>Hämtar…</span>
+              </span>
+            </li>
+          </ul>
+
+          <div class="setup-progress-section">
+            <div id="setup-progress-label" class="setup-progress-meta" role="status" aria-live="polite">
+              <span class="setup-progress-status">Hämtar EmbeddingGemma 2 (kontextanalys)…</span>
+              <span class="setup-progress-bytes">214 av 318 MB (67 %)</span>
+            </div>
+            <progress
+              id="setup-progress-bar"
+              class="setup-progress-bar"
+              aria-labelledby="setup-progress-label"
+              max="100"
+              value="67"
+            ></progress>
+          </div>
+
+          <div class="setup-offline-footer">
+            <span>Har du redan modellfilerna på ett USB-minne eller en intern nätverksdisk?</span>
+            <button type="button" class="tb-btn-subtle">
+              <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" />
+              </svg>
+              <span>Välj lokal modellmapp…</span>
+            </button>
+          </div>
+        </section>
+      </main>
+
       <!-- 2. Kompakt verktygsrad -->
-      <div role="toolbar" focusgroup="toolbar wrap" aria-label="Dokument och filter" class="action-toolbar">
+      <div role="toolbar" focusgroup="toolbar wrap" aria-label="Dokument och filter" class="action-toolbar" id="action-toolbar">
         <div role="group" aria-label="Inmatning" class="toolbar-group">
           <button type="button" class="tb-btn">
             <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -199,7 +283,7 @@
       </div>
 
       <!-- 4. Arbetsyta: Dokumentflikar till vänster, Kopiera maskerad + Avmaskera AI-svar till höger -->
-      <main class="main-workspace">
+      <main class="main-workspace" id="main-workspace">
         <div class="tabs-nav">
           <div focusgroup="tablist nomemory" aria-label="Dokumentvyer" class="tabs-list">
             <button type="button" id="tab-mask" aria-selected="true" focusgroupstart class="tab-trigger">
@@ -249,7 +333,6 @@
               <textarea
                 id="empty-editor-demo"
                 class="editor-textarea"
-                placeholder="Klistra in text här (Ctrl+V), skriv direkt, eller dra och släpp Word (.docx), Excel (.xlsx), PDF (.pdf) eller textfil..."
               ></textarea>
               <div class="editor-empty-hint">
                 <svg aria-hidden="true" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -555,6 +638,12 @@ Vid avstämningen på **[ORGANISATION A]** i **[PLATS A]** kom **[PERSON A]** oc
         const tabTable = document.getElementById("tab-table");
         const tabUnmask = document.getElementById("tab-unmask");
 
+        const setupWorkspace = document.getElementById("setup-workspace");
+        const actionToolbar = document.getElementById("action-toolbar");
+        const mainWorkspace = document.getElementById("main-workspace");
+        const headerAiPill = document.getElementById("header-ai-pill");
+        const headerAiLabel = document.getElementById("header-ai-label");
+
         const panelMask = document.getElementById("panel-mask");
         const panelTable = document.getElementById("panel-table");
         const panelUnmask = document.getElementById("panel-unmask");
@@ -575,10 +664,22 @@ Vid avstämningen på **[ORGANISATION A]** i **[PLATS A]** kom **[PERSON A]** oc
         }
 
         function setView(view) {
+          const isSetup = view === "setup";
           const isEmpty = view === "empty";
           const isMask = view === "mask" || isEmpty;
           const isTable = view === "table";
           const isUnmask = view === "unmask";
+
+          setupWorkspace.hidden = !isSetup;
+          actionToolbar.hidden = isSetup;
+          mainWorkspace.hidden = isSetup;
+          headerAiPill.className = isSetup ? "status-pill loading" : "status-pill ready";
+          headerAiLabel.textContent = isSetup ? "Förbereder lokal AI…" : "Lokal AI redo";
+
+          if (isSetup) {
+            gatekeeperBox.hidden = true;
+            return;
+          }
 
           tabMask.setAttribute("aria-selected", String(isMask));
           tabTable.setAttribute("aria-selected", String(isTable));
@@ -626,7 +727,7 @@ Vid avstämningen på **[ORGANISATION A]** i **[PLATS A]** kom **[PERSON A]** oc
 
         const params = new URLSearchParams(window.location.search);
         const initialView = params.get("view");
-        if (initialView === "empty" || initialView === "unmask" || initialView === "table" || initialView === "mask") {
+        if (initialView === "setup" || initialView === "empty" || initialView === "unmask" || initialView === "table" || initialView === "mask") {
           setView(initialView);
         }
         syncThemeUI();

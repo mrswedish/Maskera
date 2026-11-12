@@ -21,10 +21,11 @@ import {
   Moon,
   Monitor,
   Pencil,
+  FolderOpen,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { save } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import "./index.css";
 import type {
   Match,
@@ -33,6 +34,8 @@ import type {
   SafetyVerdict,
   ImportedDocument,
   ReplacementPair,
+  ModelsStatus,
+  SetupProgress,
 } from "./types";
 import {
   buildTranslationTable,
@@ -279,6 +282,7 @@ export default function App() {
     end: number;
     draft: string;
   } | null>(null);
+  const [nerInstalled, setNerInstalled] = useState(false);
   const [gemmaInstalled, setGemmaInstalled] = useState(false);
   const [gemmaLoading, setGemmaLoading] = useState(false);
   const [gemmaReady, setGemmaReady] = useState(false);
@@ -293,9 +297,16 @@ export default function App() {
     total: number;
   } | null>(null);
 
-  // Modellstatus (BERT NER)
+  // Modellstatus (BERT NER) + Förstagångsinstallation (Alternativ A)
   const [nerReady, setNerReady] = useState(false);
   const [nerStatus, setNerStatus] = useState<string>("Kontrollerar BERT NER…");
+  const [modelsChecked, setModelsChecked] = useState(false);
+  const [showFirstTimeSetup, setShowFirstTimeSetup] = useState(false);
+  const [setupProgress, setSetupProgress] = useState<SetupProgress | null>(
+    null
+  );
+  const [setupError, setSetupError] = useState<string | null>(null);
+  const [setupBusy, setSetupBusy] = useState(false);
 
   // Manuell entitet
   const [manualWord, setManualWord] = useState("");
@@ -408,17 +419,73 @@ export default function App() {
     }
   }, []);
 
-  // Ladda initiala modellstatusar
+  // Kör gemensam installation & laddning av både BERT NER och EmbeddingGemma 2
+  const runEnsureAllModels = useCallback(async () => {
+    setSetupError(null);
+    setSetupBusy(true);
+    try {
+      const st = await invoke<ModelsStatus>("ensure_all_models");
+      setNerInstalled(st.nerInstalled);
+      setGemmaInstalled(st.gemmaInstalled);
+      setNerReady(st.nerReady);
+      setGemmaReady(st.gemmaReady);
+      setSetupBusy(false);
+      setShowFirstTimeSetup(false);
+    } catch (e) {
+      setSetupBusy(false);
+      setSetupError(String(e));
+    }
+  }, []);
+
+  // Importera modellfiler från valfri lokal mapp (t.ex. USB-minne / nätverksenhet / offline-paket)
+  const handlePickLocalModelDir = useCallback(async () => {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Välj mapp med AI-modeller (BERT NER / EmbeddingGemma 2)",
+      });
+      if (!selected || typeof selected !== "string") return;
+
+      setSetupError(null);
+      setSetupBusy(true);
+      const st = await invoke<ModelsStatus>("import_models_from_dir", {
+        srcDir: selected,
+      });
+      setNerInstalled(st.nerInstalled);
+      setGemmaInstalled(st.gemmaInstalled);
+      setNerReady(st.nerReady);
+      setGemmaReady(st.gemmaReady);
+
+      if (st.nerInstalled && st.gemmaInstalled) {
+        setSetupBusy(false);
+        setShowFirstTimeSetup(false);
+      } else {
+        // Om mappen bara innehöll en av modellerna, försök hämta den återstående
+        await runEnsureAllModels();
+      }
+    } catch (e) {
+      setSetupBusy(false);
+      setSetupError(String(e));
+    }
+  }, [runEnsureAllModels]);
+
+  // Ladda initiala modellstatusar och starta engångsinstallation vid behov (Alternativ A)
   useEffect(() => {
     let active = true;
-
     const unlisteners: (() => void)[] = [];
 
-    // BERT NER events
     Promise.all([
+      listen<SetupProgress>("setup_progress", (e) => {
+        if (!active) return;
+        setSetupProgress(e.payload);
+        if (e.payload.nerDone) setNerInstalled(true);
+        if (e.payload.gemmaDone) setGemmaInstalled(true);
+      }),
       listen<void>("model_ready", () => {
         if (!active) return;
         setNerReady(true);
+        setNerInstalled(true);
       }),
       listen<{ chunk: number; total: number }>("ner_progress", (e) => {
         if (!active) return;
@@ -432,10 +499,10 @@ export default function App() {
         "download_progress",
         () => {}
       ),
-      // Gemma events
       listen<void>("gemma_ready", () => {
         if (!active) return;
         setGemmaReady(true);
+        setGemmaInstalled(true);
         setGemmaLoading(false);
         setGemmaDownloadProgress(null);
       }),
@@ -458,37 +525,37 @@ export default function App() {
       unlisteners.push(...fns);
     });
 
-    // Kontrollera BERT
-    invoke<boolean>("models_exist").then(async (exists) => {
-      if (!exists) {
-        setNerStatus("Laddar ner BERT NER från HuggingFace…");
-        invoke("download_model")
-          .then(() => invoke("load_model"))
-          .catch((e) => setNerStatus(`Fel vid nedladdning: ${e}`));
-      } else {
-        invoke("load_model").catch((e) =>
-          setNerStatus(`Kunde inte ladda BERT: ${e}`)
-        );
-      }
-    });
+    invoke<ModelsStatus>("check_models_status")
+      .then((st) => {
+        if (!active) return;
+        setNerInstalled(st.nerInstalled);
+        setGemmaInstalled(st.gemmaInstalled);
+        setNerReady(st.nerReady);
+        setGemmaReady(st.gemmaReady);
+        setModelsChecked(true);
 
-    // Kontrollera Gemma
-    invoke<boolean>("gemma_exists").then((exists) => {
-      setGemmaInstalled(exists);
-      if (exists) {
-        setGemmaLoading(true);
-        invoke("load_gemma").catch((e) => {
-          setGemmaLoading(false);
-          setGemmaStatus(`Kunde inte ladda EmbeddingGemma 2: ${e}`);
-        });
-      }
-    });
+        if (!st.nerInstalled || !st.gemmaInstalled) {
+          // Minst en modell saknas på disk -> Visa förstagångsvyn (Alternativ A) och ladda ner båda direkt
+          setShowFirstTimeSetup(true);
+          runEnsureAllModels();
+        } else {
+          // Båda modellerna finns redan på disk -> Öppna editorn direkt och ladda in i RAM i bakgrunden
+          setShowFirstTimeSetup(false);
+          runEnsureAllModels();
+        }
+      })
+      .catch((e) => {
+        if (!active) return;
+        setModelsChecked(true);
+        setShowFirstTimeSetup(true);
+        setSetupError(String(e));
+      });
 
     return () => {
       active = false;
       unlisteners.forEach((f) => f());
     };
-  }, []);
+  }, [runEnsureAllModels]);
 
   // Aktiva träffar & översättningstabell
   const activeMatches = useMemo(
@@ -1008,19 +1075,6 @@ export default function App() {
       });
     } catch (e) {
       alert("Kunde inte avmaskera dokumentet: " + String(e));
-    }
-  };
-
-  // Ladda ner EmbeddingGemma 2 on demand
-  const handleDownloadGemma = async () => {
-    setGemmaLoading(true);
-    try {
-      await invoke("download_gemma");
-      await invoke("load_gemma");
-      setGemmaInstalled(true);
-    } catch (e) {
-      alert("Kunde inte installera EmbeddingGemma 2: " + String(e));
-      setGemmaLoading(false);
     }
   };
 
@@ -1683,8 +1737,17 @@ export default function App() {
   const beforeBadge = verdictBadge(report?.verdict_before_mask);
   const afterBadge = verdictBadge(report?.verdict_after_mask);
 
-  const aiBusy = analyzing || classifying || gemmaLoading || !nerReady;
-  const aiStatusText = analyzing
+  const aiBusy =
+    analyzing ||
+    classifying ||
+    gemmaLoading ||
+    setupBusy ||
+    (!nerReady && !setupError);
+  const aiStatusText = showFirstTimeSetup
+    ? setupError
+      ? "Väntar på modellinstallation"
+      : "Förbereder lokal AI…"
+    : analyzing
     ? nerProgress && nerProgress.total > 0
       ? `Skannar (${nerProgress.chunk}/${nerProgress.total})…`
       : "Skannar text…"
@@ -1701,6 +1764,33 @@ export default function App() {
     : !nerReady
     ? "Startar lokal AI…"
     : "Lokal AI redo";
+
+  const nerDoneInSetup = nerInstalled || Boolean(setupProgress?.nerDone);
+  const gemmaDoneInSetup = gemmaInstalled || Boolean(setupProgress?.gemmaDone);
+  const isDeterminateSetupProgress =
+    setupProgress !== null &&
+    setupProgress.phase === "downloading" &&
+    setupProgress.totalBytes > 0;
+  const setupPercent = isDeterminateSetupProgress
+    ? Math.min(
+        100,
+        Math.max(
+          1,
+          Math.round(
+            (setupProgress.downloadedBytes / setupProgress.totalBytes) * 100
+          )
+        )
+      )
+    : 0;
+  const setupBytesText = isDeterminateSetupProgress
+    ? `${(setupProgress.downloadedBytes / 1_000_000).toFixed(0)} av ${(
+        setupProgress.totalBytes / 1_000_000
+      ).toFixed(0)} MB (${setupPercent} %)`
+    : setupProgress?.phase === "loading"
+    ? "Laddar in i RAM…"
+    : setupProgress?.phase === "copying"
+    ? "Kopierar modellfiler…"
+    : "";
 
   const showUnifiedDocHeader =
     Boolean(sourceText) &&
@@ -1739,12 +1829,12 @@ export default function App() {
             className={`status-pill ${
               analyzing || classifying
                 ? "working"
-                : gemmaLoading || !nerReady
+                : gemmaLoading || setupBusy || !nerReady
                 ? "loading"
                 : "ready"
             }`}
             title={`BERT NER: ${nerReady ? "Aktiv" : nerStatus} · EmbeddingGemma 2: ${
-              gemmaReady ? "Aktiv" : gemmaStatus || "Valfri"
+              gemmaReady ? "Aktiv" : gemmaStatus || "Klar vid start"
             }`}
           >
             {aiBusy && <RefreshCw size={12} className="spin" aria-hidden="true" />}
@@ -1773,6 +1863,201 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      {!modelsChecked ? (
+        <main className="main-workspace" aria-busy="true" />
+      ) : showFirstTimeSetup ? (
+        /* ── Alternativ A: Välkomst- & engångsinstallationsvy (visas endast om modeller saknas vid start) ── */
+        <main className="setup-workspace">
+          <section
+            className="setup-card"
+            aria-labelledby="setup-heading"
+          >
+            <div className="setup-card-header">
+              <div className="setup-icon-badge" aria-hidden="true">
+                <Sparkles size={22} />
+              </div>
+              <div className="setup-title-group">
+                <h2 id="setup-heading" className="setup-title">
+                  Förbereder lokal AI — engångsnedladdning
+                </h2>
+                <p className="setup-subtitle">
+                  Maskera hämtar nu språk- och kontextmodellerna (~318 MB totalt)
+                  en enda gång till din dator. Därefter körs all avidentifiering
+                  och säkerhetskontroll <strong>100 % lokalt och offline</strong>{" "}
+                  — ingen text lämnar någonsin din dator.
+                </p>
+              </div>
+            </div>
+
+            <ul className="setup-model-list" role="list">
+              <li
+                className={`setup-model-item ${
+                  nerDoneInSetup
+                    ? "done"
+                    : setupBusy && !setupError
+                    ? "active"
+                    : ""
+                }`}
+              >
+                <div className="setup-model-info">
+                  <div className="setup-model-name-row">
+                    <strong>1. Svensk BERT NER</strong>
+                    <span className="setup-model-size">~121 MB</span>
+                  </div>
+                  <p className="setup-model-desc">
+                    Hittar personnamn, organisationer, platser, tider och
+                    händelser i svensk löptext (KBLab/Kungliga biblioteket).
+                  </p>
+                </div>
+                <span
+                  className={`setup-step-pill ${
+                    nerDoneInSetup
+                      ? "done"
+                      : setupBusy && !setupError
+                      ? "active"
+                      : "pending"
+                  }`}
+                >
+                  {nerDoneInSetup ? (
+                    <>
+                      <Check size={13} aria-hidden="true" />
+                      <span>Klar</span>
+                    </>
+                  ) : setupBusy && !setupError ? (
+                    <>
+                      <RefreshCw size={13} className="spin" aria-hidden="true" />
+                      <span>Hämtar…</span>
+                    </>
+                  ) : (
+                    <span>Väntar</span>
+                  )}
+                </span>
+              </li>
+
+              <li
+                className={`setup-model-item ${
+                  gemmaDoneInSetup
+                    ? "done"
+                    : setupBusy && !setupError && nerDoneInSetup
+                    ? "active"
+                    : ""
+                }`}
+              >
+                <div className="setup-model-info">
+                  <div className="setup-model-name-row">
+                    <strong>2. EmbeddingGemma 2</strong>
+                    <span className="setup-model-size">~197 MB</span>
+                  </div>
+                  <p className="setup-model-desc">
+                    Semantisk säkerhetskontroll som varnar för patient-/vårduppgifter,
+                    företagshemligheter, sårbarheter och HR-ärenden.
+                  </p>
+                </div>
+                <span
+                  className={`setup-step-pill ${
+                    gemmaDoneInSetup
+                      ? "done"
+                      : setupBusy && !setupError && nerDoneInSetup
+                      ? "active"
+                      : "pending"
+                  }`}
+                >
+                  {gemmaDoneInSetup ? (
+                    <>
+                      <Check size={13} aria-hidden="true" />
+                      <span>Klar</span>
+                    </>
+                  ) : setupBusy && !setupError && nerDoneInSetup ? (
+                    <>
+                      <RefreshCw size={13} className="spin" aria-hidden="true" />
+                      <span>Hämtar…</span>
+                    </>
+                  ) : (
+                    <span>Väntar</span>
+                  )}
+                </span>
+              </li>
+            </ul>
+
+            <div className="setup-progress-section">
+              <div
+                id="setup-progress-label"
+                className="setup-progress-meta"
+                role="status"
+                aria-live="polite"
+              >
+                <span className="setup-progress-status">
+                  {setupError
+                    ? "Nedladdningen avbröts"
+                    : setupProgress?.label || "Ansluter till HuggingFace…"}
+                </span>
+                {setupBytesText && !setupError && (
+                  <span className="setup-progress-bytes">{setupBytesText}</span>
+                )}
+              </div>
+              <progress
+                id="setup-progress-bar"
+                className="setup-progress-bar"
+                aria-labelledby="setup-progress-label"
+                max={100}
+                value={isDeterminateSetupProgress ? setupPercent : undefined}
+              />
+            </div>
+
+            {setupError ? (
+              <div className="setup-error-box" role="alert">
+                <div className="setup-error-header">
+                  <AlertTriangle size={16} aria-hidden="true" />
+                  <strong>Kunde inte hämta AI-modellerna automatiskt</strong>
+                </div>
+                <p className="setup-error-detail">{setupError}</p>
+                <div className="setup-error-actions">
+                  <button
+                    type="button"
+                    className="tb-btn-primary"
+                    onClick={runEnsureAllModels}
+                  >
+                    <RefreshCw size={15} aria-hidden="true" />
+                    <span>Försök igen</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="tb-btn"
+                    onClick={handlePickLocalModelDir}
+                  >
+                    <FolderOpen size={15} aria-hidden="true" />
+                    <span>Välj lokal modellmapp…</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="tb-btn-subtle"
+                    onClick={() => setShowFirstTimeSetup(false)}
+                  >
+                    <span>Öppna ändå (endast mönster/regex offline)</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="setup-offline-footer">
+                <span>
+                  Har du redan modellfilerna på ett USB-minne eller en intern
+                  nätverksdisk?
+                </span>
+                <button
+                  type="button"
+                  className="tb-btn-subtle"
+                  onClick={handlePickLocalModelDir}
+                >
+                  <FolderOpen size={13} aria-hidden="true" />
+                  <span>Välj lokal modellmapp…</span>
+                </button>
+              </div>
+            )}
+          </section>
+        </main>
+      ) : (
+        <>
 
       {/* Dold filväljare utanför role="toolbar" så att verktygsraden enbart har riktiga <button> */}
       <input
@@ -2160,38 +2445,6 @@ export default function App() {
               )}
             </>
           )}
-
-          {/* CTA för att ladda ner EmbeddingGemma 2 om den inte är installerad */}
-          {!gemmaInstalled && !analyzing && !classifying && (
-            <div className="gemma-cta-box">
-              <div className="gemma-cta-text">
-                <Sparkles size={16} />
-                <span>
-                  <strong>Aktivera kontextanalys:</strong> Hämta EmbeddingGemma 2
-                  (~197 MB lokalt) för att upptäcka hälsouppgifter, tjänstekort/eID,
-                  företagshemligheter och IT-säkerhet.
-                </span>
-              </div>
-              <button
-                type="button"
-                className="btn-download-gemma"
-                onClick={handleDownloadGemma}
-                disabled={gemmaLoading}
-              >
-                {gemmaLoading ? (
-                  <>
-                    <RefreshCw size={14} className="spin" />
-                    <span>Laddar ner…</span>
-                  </>
-                ) : (
-                  <>
-                    <Download size={14} />
-                    <span>Hämta modell (197 MB)</span>
-                  </>
-                )}
-              </button>
-            </div>
-          )}
         </section>
       )}
 
@@ -2304,9 +2557,20 @@ export default function App() {
                   }
                 }}
               >
+                <label
+                  htmlFor="source-editor-textarea"
+                  className="visually-hidden"
+                >
+                  Källtext att granska och maskera
+                </label>
                 <textarea
+                  id="source-editor-textarea"
                   className="editor-textarea"
-                  placeholder="Klistra in text här (Ctrl+V), skriv direkt, eller dra och släpp Word (.docx), Excel (.xlsx), PDF (.pdf) eller textfil..."
+                  placeholder={
+                    sourceText
+                      ? "Skriv eller klistra in text här…"
+                      : undefined
+                  }
                   value={sourceText}
                   onChange={(e) => handleSourceTextEdit(e.target.value)}
                 />
@@ -2691,6 +2955,8 @@ export default function App() {
           </div>
         </div>
       </main>
+        </>
+      )}
     </div>
   );
 }

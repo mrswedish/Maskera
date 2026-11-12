@@ -18,20 +18,20 @@ static SESSION: OnceLock<NerModel> = OnceLock::new();
 static TOKENIZER: OnceLock<Tokenizer> = OnceLock::new();
 static CLASSIFIER: OnceLock<EmbeddingClassifier> = OnceLock::new();
 
-/// Filer för KBLab BERT NER
-const MODEL_FILES: &[(&str, &str)] = &[
-    ("onnx/model_quantized.onnx", "model_quantized.onnx"),
-    ("tokenizer.json", "tokenizer.json"),
-    ("tokenizer_config.json", "tokenizer_config.json"),
-    ("special_tokens_map.json", "special_tokens_map.json"),
-    ("config.json", "config.json"),
+/// Filer för KBLab BERT NER (med ungefärlig storlek i byte för jämn total-progressbar)
+const MODEL_FILES: &[(&str, &str, u64)] = &[
+    ("onnx/model_quantized.onnx", "model_quantized.onnx", 125_800_000),
+    ("tokenizer.json", "tokenizer.json", 1_150_000),
+    ("tokenizer_config.json", "tokenizer_config.json", 1_300),
+    ("special_tokens_map.json", "special_tokens_map.json", 125),
+    ("config.json", "config.json", 1_200),
 ];
 
 /// Filer för EmbeddingGemma 2 (Q4 text-backbone)
-const GEMMA_FILES: &[(&str, &str)] = &[
-    ("onnx/model_q4.onnx", "model_q4.onnx"),
-    ("onnx/model_q4.onnx_data", "model_q4.onnx_data"),
-    ("tokenizer.json", "tokenizer.json"),
+const GEMMA_FILES: &[(&str, &str, u64)] = &[
+    ("onnx/model_q4.onnx", "model_q4.onnx", 490_000),
+    ("onnx/model_q4.onnx_data", "model_q4.onnx_data", 174_000_000),
+    ("tokenizer.json", "tokenizer.json", 32_500_000),
 ];
 
 const HF_BASE_NER: &str =
@@ -123,6 +123,28 @@ struct DownloadProgress {
     total: u64,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelsStatus {
+    ner_installed: bool,
+    gemma_installed: bool,
+    ner_ready: bool,
+    gemma_ready: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetupProgress {
+    phase: String,
+    step: usize,
+    total_steps: usize,
+    ner_done: bool,
+    gemma_done: bool,
+    label: String,
+    downloaded_bytes: u64,
+    total_bytes: u64,
+}
+
 // ── Hjälpfunktioner för kataloger ─────────────────────────────────────────────
 
 fn models_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -141,6 +163,20 @@ fn gemma_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Portabla / förpackade modellkataloger (bredvid Maskera-portabel.exe eller i resource_dir)
+fn candidate_bundled_model_dirs(app: &AppHandle) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            dirs.push(parent.join("models"));
+        }
+    }
+    if let Ok(res) = app.path().resource_dir() {
+        dirs.push(res.join("models"));
+    }
+    dirs
+}
+
 fn find_source_model_file(src_dir: &Path, remote_rel: &str, local_name: &str) -> Option<PathBuf> {
     let flat = src_dir.join(local_name);
     if flat.exists() {
@@ -153,23 +189,455 @@ fn find_source_model_file(src_dir: &Path, remote_rel: &str, local_name: &str) ->
     None
 }
 
+/// Kontrollerar om en katalog innehåller alla nödvändiga filer för BERT NER
+fn dir_has_all_ner_files(dir: &Path) -> bool {
+    MODEL_FILES
+        .iter()
+        .all(|&(remote_rel, local_name, _)| find_source_model_file(dir, remote_rel, local_name).is_some())
+}
+
+/// Hittar katalog där alla BERT NER-filer redan finns (app_data_dir, exe_dir/models eller resource_dir/models)
+fn resolve_existing_ner_dir(app: &AppHandle) -> Option<PathBuf> {
+    if let Ok(data) = models_dir(app) {
+        if dir_has_all_ner_files(&data) {
+            return Some(data);
+        }
+    }
+    for cand in candidate_bundled_model_dirs(app) {
+        if dir_has_all_ner_files(&cand) {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+/// Kontrollerar om en katalog har alla tre EmbeddingGemma 2-filer direkt på plats (krävs av ONNX external_data)
+fn dir_has_ready_gemma_files(dir: &Path) -> bool {
+    GEMMA_FILES
+        .iter()
+        .all(|&(_, local_name, _)| dir.join(local_name).exists())
+}
+
+/// Hittar katalog där alla EmbeddingGemma 2-filer finns samlade
+fn resolve_existing_gemma_dir(app: &AppHandle) -> Option<PathBuf> {
+    if let Ok(gdir) = gemma_dir(app) {
+        if dir_has_ready_gemma_files(&gdir) {
+            return Some(gdir);
+        }
+    }
+    for cand in candidate_bundled_model_dirs(app) {
+        let sub = cand.join("embeddinggemma2");
+        if dir_has_ready_gemma_files(&sub) {
+            return Some(sub);
+        }
+        if dir_has_ready_gemma_files(&cand) {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+// ── Samlad kontroll & engångsnedladdning (Lager 2 + Lager 3) ─────────────────
+
+#[tauri::command]
+fn check_models_status(app: AppHandle) -> Result<ModelsStatus, String> {
+    let ner_ready = SESSION.get().is_some();
+    let gemma_ready = CLASSIFIER.get().is_some();
+    let ner_installed = ner_ready || resolve_existing_ner_dir(&app).is_some();
+    let gemma_installed = gemma_ready || resolve_existing_gemma_dir(&app).is_some();
+    Ok(ModelsStatus {
+        ner_installed,
+        gemma_installed,
+        ner_ready,
+        gemma_ready,
+    })
+}
+
+struct QueuedDownload {
+    step: usize,
+    is_gemma: bool,
+    model_title: &'static str,
+    local_name: &'static str,
+    url: String,
+    dest: PathBuf,
+    estimated_bytes: u64,
+}
+
+#[tauri::command]
+async fn ensure_all_models(app: AppHandle) -> Result<ModelsStatus, String> {
+    use futures_util::StreamExt;
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+
+    let ner_dir_existing = resolve_existing_ner_dir(&app);
+    let gemma_dir_existing = resolve_existing_gemma_dir(&app);
+
+    let need_ner_download = SESSION.get().is_none() && ner_dir_existing.is_none();
+    let need_gemma_download = CLASSIFIER.get().is_none() && gemma_dir_existing.is_none();
+
+    let total_steps = match (need_ner_download, need_gemma_download) {
+        (true, true) => 2,
+        (true, false) | (false, true) => 1,
+        (false, false) => 2,
+    };
+
+    let mut queue: Vec<QueuedDownload> = Vec::new();
+    let data_ner_dir = models_dir(&app)?;
+    let data_gemma_dir = gemma_dir(&app)?;
+
+    if need_ner_download {
+        for &(remote_rel, local_name, est) in MODEL_FILES {
+            let dest = data_ner_dir.join(local_name);
+            if !dest.exists() {
+                queue.push(QueuedDownload {
+                    step: 1,
+                    is_gemma: false,
+                    model_title: "språkmodell (Svensk BERT NER)",
+                    local_name,
+                    url: format!("{HF_BASE_NER}/{remote_rel}"),
+                    dest,
+                    estimated_bytes: est,
+                });
+            }
+        }
+    }
+
+    if need_gemma_download {
+        let step_num = if need_ner_download { 2 } else { 1 };
+        for &(remote_rel, local_name, est) in GEMMA_FILES {
+            let dest = data_gemma_dir.join(local_name);
+            if !dest.exists() {
+                queue.push(QueuedDownload {
+                    step: step_num,
+                    is_gemma: true,
+                    model_title: "kontextmodell (EmbeddingGemma 2)",
+                    local_name,
+                    url: format!("{HF_BASE_GEMMA}/{remote_rel}"),
+                    dest,
+                    estimated_bytes: est,
+                });
+            }
+        }
+    }
+
+    let mut planned_total: u64 = queue.iter().map(|q| q.estimated_bytes).sum();
+    let mut completed_bytes: u64 = 0;
+
+    if !queue.is_empty() {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(1200))
+            .build()
+            .map_err(|e| format!("HTTP-klient-fel: {e}"))?;
+
+        for item in queue {
+            let ner_done_now = !need_ner_download || item.is_gemma;
+            let label = format!("Hämtar {}…", item.model_title);
+
+            let _ = app.emit(
+                "setup_progress",
+                SetupProgress {
+                    phase: "downloading".into(),
+                    step: item.step,
+                    total_steps,
+                    ner_done: ner_done_now,
+                    gemma_done: false,
+                    label: label.clone(),
+                    downloaded_bytes: completed_bytes,
+                    total_bytes: planned_total,
+                },
+            );
+
+            let resp = client
+                .get(&item.url)
+                .send()
+                .await
+                .map_err(|e| format!("Nätverksfel vid hämtning av {}: {e}", item.local_name))?;
+
+            if !resp.status().is_success() {
+                return Err(format!(
+                    "Serverfel (HTTP {}) vid hämtning av {}",
+                    resp.status(),
+                    item.local_name
+                ));
+            }
+
+            let actual_total = resp.content_length().unwrap_or(item.estimated_bytes);
+            if actual_total > 0 {
+                planned_total = planned_total
+                    .saturating_sub(item.estimated_bytes)
+                    .saturating_add(actual_total);
+            }
+
+            let tmp = item.dest.with_extension("part");
+            let mut file = std::fs::File::create(&tmp)
+                .map_err(|e| format!("Kan inte skapa temporär fil för {}: {e}", item.local_name))?;
+            let mut file_downloaded: u64 = 0;
+            let mut stream = resp.bytes_stream();
+            let mut last_emit = Instant::now()
+                .checked_sub(Duration::from_millis(100))
+                .unwrap_or_else(Instant::now);
+
+            while let Some(chunk) = stream.next().await {
+                let chunk =
+                    chunk.map_err(|e| format!("Läsfel vid hämtning av {}: {e}", item.local_name))?;
+                file.write_all(&chunk)
+                    .map_err(|e| format!("Skrivfel för {}: {e}", item.local_name))?;
+                file_downloaded += chunk.len() as u64;
+
+                if last_emit.elapsed() >= Duration::from_millis(40) {
+                    last_emit = Instant::now();
+                    let _ = app.emit(
+                        "setup_progress",
+                        SetupProgress {
+                            phase: "downloading".into(),
+                            step: item.step,
+                            total_steps,
+                            ner_done: ner_done_now,
+                            gemma_done: false,
+                            label: label.clone(),
+                            downloaded_bytes: completed_bytes + file_downloaded,
+                            total_bytes: planned_total.max(completed_bytes + file_downloaded),
+                        },
+                    );
+                }
+            }
+
+            drop(file);
+            if std::fs::rename(&tmp, &item.dest).is_err() {
+                std::fs::copy(&tmp, &item.dest)
+                    .map_err(|e| format!("Kunde inte spara {}: {e}", item.local_name))?;
+                let _ = std::fs::remove_file(&tmp);
+            }
+
+            completed_bytes += file_downloaded;
+            planned_total = planned_total.max(completed_bytes);
+            let _ = app.emit(
+                "setup_progress",
+                SetupProgress {
+                    phase: "downloading".into(),
+                    step: item.step,
+                    total_steps,
+                    ner_done: ner_done_now,
+                    gemma_done: false,
+                    label,
+                    downloaded_bytes: completed_bytes,
+                    total_bytes: planned_total,
+                },
+            );
+        }
+    }
+
+    // Ladda in BERT NER i minnet om den inte redan är laddad
+    if SESSION.get().is_none() {
+        let ner_dir = resolve_existing_ner_dir(&app).unwrap_or(data_ner_dir);
+        let _ = app.emit(
+            "setup_progress",
+            SetupProgress {
+                phase: "loading".into(),
+                step: 1,
+                total_steps,
+                ner_done: false,
+                gemma_done: CLASSIFIER.get().is_some(),
+                label: "Initierar språkmodell (Svensk BERT NER) i minnet…".into(),
+                downloaded_bytes: planned_total,
+                total_bytes: planned_total,
+            },
+        );
+        let app_c = app.clone();
+        tauri::async_runtime::spawn_blocking(move || load_and_store(&ner_dir, &app_c))
+            .await
+            .map_err(|e| format!("spawn_blocking-fel (BERT): {e}"))??;
+        let _ = app.emit("model_ready", ());
+    }
+
+    // Ladda in EmbeddingGemma 2 i minnet om den inte redan är laddad
+    if CLASSIFIER.get().is_none() {
+        let g_dir = resolve_existing_gemma_dir(&app).unwrap_or(data_gemma_dir);
+        let _ = app.emit(
+            "setup_progress",
+            SetupProgress {
+                phase: "loading".into(),
+                step: total_steps,
+                total_steps,
+                ner_done: true,
+                gemma_done: false,
+                label: "Initierar kontextmodell (EmbeddingGemma 2) & säkerhetsankare…".into(),
+                downloaded_bytes: planned_total,
+                total_bytes: planned_total,
+            },
+        );
+        let app_c = app.clone();
+        tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+            let _ = app_c.emit(
+                "gemma_status",
+                ModelStatus {
+                    message: "Initierar EmbeddingGemma 2 & beräknar klassificeringsankare…".into(),
+                },
+            );
+            let clf = EmbeddingClassifier::load(&g_dir)?;
+            let _ = CLASSIFIER.set(clf);
+            Ok(())
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking-fel (EmbeddingGemma 2): {e}"))??;
+        let _ = app.emit("gemma_ready", ());
+    }
+
+    let _ = app.emit(
+        "setup_progress",
+        SetupProgress {
+            phase: "ready".into(),
+            step: total_steps,
+            total_steps,
+            ner_done: true,
+            gemma_done: true,
+            label: "Alla lokala AI-modeller är redo.".into(),
+            downloaded_bytes: planned_total,
+            total_bytes: planned_total,
+        },
+    );
+
+    Ok(ModelsStatus {
+        ner_installed: true,
+        gemma_installed: true,
+        ner_ready: SESSION.get().is_some(),
+        gemma_ready: CLASSIFIER.get().is_some(),
+    })
+}
+
+/// Importera modellfiler offline från en lokal mapp (t.ex. utdelad av IT-avdelning)
+#[tauri::command]
+async fn import_models_from_dir(src_dir: String, app: AppHandle) -> Result<ModelsStatus, String> {
+    let root = PathBuf::from(&src_dir);
+    if !root.exists() {
+        return Err("Den valda mappen finns inte.".into());
+    }
+
+    let dest_ner = models_dir(&app)?;
+    let dest_gemma = gemma_dir(&app)?;
+
+    // Sök i vald mapp samt undermappar `models` och `embeddinggemma2`
+    let search_dirs = [
+        root.clone(),
+        root.join("models"),
+        root.join("embeddinggemma2"),
+        root.join("models").join("embeddinggemma2"),
+    ];
+
+    let mut ner_found: Vec<(PathBuf, &'static str)> = Vec::new();
+    for &(remote_rel, local_name, _) in MODEL_FILES {
+        for sdir in [&root, &root.join("models")] {
+            if let Some(p) = find_source_model_file(sdir, remote_rel, local_name) {
+                ner_found.push((p, local_name));
+                break;
+            }
+        }
+    }
+
+    let mut gemma_found: Vec<(PathBuf, &'static str)> = Vec::new();
+    for &(remote_rel, local_name, _) in GEMMA_FILES {
+        for sdir in &search_dirs {
+            if let Some(p) = find_source_model_file(sdir, remote_rel, local_name) {
+                // Undvik att blanda ihop BERTs tokenizer.json (1.1 MB) med Gemmas tokenizer.json (31 MB)
+                if local_name == "tokenizer.json" {
+                    if let Ok(meta) = std::fs::metadata(&p) {
+                        if meta.len() < 5_000_000 {
+                            continue;
+                        }
+                    }
+                }
+                gemma_found.push((p, local_name));
+                break;
+            }
+        }
+    }
+
+    if ner_found.len() < MODEL_FILES.len() && gemma_found.len() < GEMMA_FILES.len() {
+        return Err(
+            "Hittade inte kompletta modellfiler i den valda mappen. Mappen behöver innehålla BERT NER (model_quantized.onnx, tokenizer.json m.fl.) och/eller undermappen embeddinggemma2 (model_q4.onnx, model_q4.onnx_data, tokenizer.json).".into(),
+        );
+    }
+
+    let app_c = app.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        if ner_found.len() == MODEL_FILES.len() {
+            let _ = app_c.emit(
+                "setup_progress",
+                SetupProgress {
+                    phase: "copying".into(),
+                    step: 1,
+                    total_steps: 2,
+                    ner_done: false,
+                    gemma_done: false,
+                    label: "Kopierar språkmodell (BERT NER) från lokal mapp…".into(),
+                    downloaded_bytes: 0,
+                    total_bytes: 0,
+                },
+            );
+            for (src_path, local_name) in ner_found {
+                let dst = dest_ner.join(local_name);
+                if src_path != dst {
+                    std::fs::copy(&src_path, &dst)
+                        .map_err(|e| format!("Kunde inte kopiera {local_name}: {e}"))?;
+                }
+            }
+        }
+        if gemma_found.len() == GEMMA_FILES.len() {
+            let _ = app_c.emit(
+                "setup_progress",
+                SetupProgress {
+                    phase: "copying".into(),
+                    step: 2,
+                    total_steps: 2,
+                    ner_done: true,
+                    gemma_done: false,
+                    label: "Kopierar kontextmodell (EmbeddingGemma 2) från lokal mapp…".into(),
+                    downloaded_bytes: 0,
+                    total_bytes: 0,
+                },
+            );
+            for (src_path, local_name) in gemma_found {
+                let dst = dest_gemma.join(local_name);
+                if src_path != dst {
+                    std::fs::copy(&src_path, &dst)
+                        .map_err(|e| format!("Kunde inte kopiera {local_name}: {e}"))?;
+                }
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking-fel (import_models): {e}"))??;
+
+    // Om båda nu finns på plats, ladda in dem direkt; annars ladda det som finns
+    if resolve_existing_ner_dir(&app).is_some() && SESSION.get().is_none() {
+        let dir = resolve_existing_ner_dir(&app).unwrap();
+        let app_c = app.clone();
+        tauri::async_runtime::spawn_blocking(move || load_and_store(&dir, &app_c))
+            .await
+            .map_err(|e| format!("spawn_blocking-fel: {e}"))??;
+        let _ = app.emit("model_ready", ());
+    }
+    if resolve_existing_gemma_dir(&app).is_some() && CLASSIFIER.get().is_none() {
+        let dir = resolve_existing_gemma_dir(&app).unwrap();
+        tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+            let clf = EmbeddingClassifier::load(&dir)?;
+            let _ = CLASSIFIER.set(clf);
+            Ok(())
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking-fel: {e}"))??;
+        let _ = app.emit("gemma_ready", ());
+    }
+
+    check_models_status(app)
+}
+
 // ── KBLab BERT NER Kommandon ──────────────────────────────────────────────────
 
 #[tauri::command]
 fn models_exist(app: AppHandle) -> Result<bool, String> {
-    let data = models_dir(&app)?;
-    let resource = app.path().resource_dir().ok().map(|d| d.join("models"));
-
-    for &(remote_rel, local_name) in MODEL_FILES {
-        let in_data = data.join(local_name).exists();
-        let in_res = resource
-            .as_ref()
-            .is_some_and(|d| find_source_model_file(d, remote_rel, local_name).is_some());
-        if !in_data && !in_res {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    Ok(resolve_existing_ner_dir(&app).is_some())
 }
 
 #[tauri::command]
@@ -183,7 +651,7 @@ async fn download_model(app: AppHandle) -> Result<(), String> {
         .build()
         .map_err(|e| format!("HTTP-klient-fel: {e}"))?;
 
-    for &(remote_rel, local_name) in MODEL_FILES {
+    for &(remote_rel, local_name, _) in MODEL_FILES {
         let dest = dir.join(local_name);
         if dest.exists() {
             continue;
@@ -246,7 +714,7 @@ async fn load_model_from_dir(src_dir: String, app: AppHandle) -> Result<(), Stri
 
     let mut resolved: Vec<(PathBuf, &'static str)> = Vec::with_capacity(MODEL_FILES.len());
     let mut missing: Vec<&str> = Vec::new();
-    for &(remote_rel, local_name) in MODEL_FILES {
+    for &(remote_rel, local_name, _) in MODEL_FILES {
         if let Some(found) = find_source_model_file(&src, remote_rel, local_name) {
             resolved.push((found, local_name));
         } else {
@@ -291,28 +759,12 @@ async fn load_model(app: AppHandle) -> Result<(), String> {
         },
     );
 
-    let data_dir = models_dir(&app)?;
-    let res_dir = app.path().resource_dir().ok().map(|d| d.join("models"));
-
-    for &(remote_rel, local_name) in MODEL_FILES {
-        let dst = data_dir.join(local_name);
-        if dst.exists() {
-            continue;
-        }
-        if let Some(ref rd) = res_dir {
-            if let Some(src) = find_source_model_file(rd, remote_rel, local_name) {
-                std::fs::copy(&src, &dst)
-                    .map_err(|e| format!("Kunde inte kopiera {local_name}: {e}"))?;
-                continue;
-            }
-        }
-        return Err(format!(
-            "Modellfil saknas: {local_name}. Starta om appen för att ladda ner."
-        ));
-    }
+    let dir = resolve_existing_ner_dir(&app).ok_or_else(|| {
+        "Språkmodellen saknas på disk. Starta om appen för att hämta modellerna.".to_string()
+    })?;
 
     let app_c = app.clone();
-    tauri::async_runtime::spawn_blocking(move || load_and_store(&data_dir, &app_c))
+    tauri::async_runtime::spawn_blocking(move || load_and_store(&dir, &app_c))
         .await
         .map_err(|e| format!("spawn_blocking-fel: {e}"))??;
 
@@ -326,8 +778,12 @@ fn load_and_store(dir: &Path, app: &AppHandle) -> Result<(), String> {
             message: "Initierar ONNX Runtime…".into(),
         },
     );
-    let model = ner::load_model(&dir.join("model_quantized.onnx"))?;
-    let tokenizer = ner::load_tokenizer(&dir.join("tokenizer.json"))?;
+    let model_path = find_source_model_file(dir, "onnx/model_quantized.onnx", "model_quantized.onnx")
+        .unwrap_or_else(|| dir.join("model_quantized.onnx"));
+    let tok_path = find_source_model_file(dir, "tokenizer.json", "tokenizer.json")
+        .unwrap_or_else(|| dir.join("tokenizer.json"));
+    let model = ner::load_model(&model_path)?;
+    let tokenizer = ner::load_tokenizer(&tok_path)?;
     let _ = SESSION.set(model);
     let _ = TOKENIZER.set(tokenizer);
     Ok(())
@@ -337,13 +793,7 @@ fn load_and_store(dir: &Path, app: &AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn gemma_exists(app: AppHandle) -> Result<bool, String> {
-    let dir = gemma_dir(&app)?;
-    for &(_, local_name) in GEMMA_FILES {
-        if !dir.join(local_name).exists() {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    Ok(resolve_existing_gemma_dir(&app).is_some())
 }
 
 #[tauri::command]
@@ -357,7 +807,7 @@ async fn download_gemma(app: AppHandle) -> Result<(), String> {
         .build()
         .map_err(|e| format!("HTTP-klient-fel: {e}"))?;
 
-    for &(remote_rel, local_name) in GEMMA_FILES {
+    for &(remote_rel, local_name, _) in GEMMA_FILES {
         let dest = dir.join(local_name);
         if dest.exists() {
             continue;
@@ -420,14 +870,9 @@ async fn load_gemma(app: AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
-    let dir = gemma_dir(&app)?;
-    for &(_, local_name) in GEMMA_FILES {
-        if !dir.join(local_name).exists() {
-            return Err(format!(
-                "EmbeddingGemma 2-fil saknas: {local_name}. Ladda ner modellen först."
-            ));
-        }
-    }
+    let dir = resolve_existing_gemma_dir(&app).ok_or_else(|| {
+        "EmbeddingGemma 2 saknas på disk. Ladda ner modellen först.".to_string()
+    })?;
 
     let app_c = app.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
@@ -900,6 +1345,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            check_models_status,
+            ensure_all_models,
+            import_models_from_dir,
             models_exist,
             download_model,
             load_model,
