@@ -2169,7 +2169,7 @@ progress.setup-progress-bar:indeterminate::-moz-progress-bar {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.65rem;
   flex-shrink: 0;
-  max-block-size: 38vh;
+  max-block-size: 44vh;
   overflow-y: auto;
 }
 
@@ -2282,6 +2282,7 @@ article.info-card.guidance-card {
 }
 
 .info-card-content {
+  flex: 1;
   display: flex;
   flex-direction: column;
   gap: 0.45rem;
@@ -2370,14 +2371,35 @@ article.info-card.guidance-card {
   text-wrap: pretty;
 }
 
-.info-disclaimer {
-  margin: 0.1rem 0 0 0;
-  padding-top: 0.35rem;
-  border-top: 1px solid var(--border-subtle);
-  font-size: 0.72rem;
-  line-height: 1.38;
-  color: var(--text-muted);
+.info-decision-callout {
+  margin-block-start: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 7px;
+  background: light-dark(#eef2ff, rgba(99, 102, 241, 0.16));
+  border: 1px solid light-dark(#6366f1, #818cf8);
+  border-inline-start: 4px solid light-dark(#4338ca, #818cf8);
+}
+
+.info-callout-icon {
+  flex-shrink: 0;
+  margin-block-start: 0.12rem;
+  color: light-dark(#4338ca, #a5b4fc);
+}
+
+.info-callout-text {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.42;
+  color: var(--text-primary);
   text-wrap: pretty;
+}
+
+.info-callout-text strong {
+  color: light-dark(#312e81, #e0e7ff);
+  font-weight: 700;
 }
 
 .classify-workspace .classify-panel-inner {
@@ -2396,7 +2418,8 @@ article.info-card.guidance-card {
     color: ButtonText;
   }
   .flagged-para-block,
-  article.info-card {
+  article.info-card,
+  .info-decision-callout {
     border: 2px solid Highlight;
   }
 }

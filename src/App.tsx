@@ -1972,8 +1972,8 @@ export default function App() {
                   )}
                   <span>
                     {isRed
-                      ? "Röd · Kräver särskilt skydd"
-                      : "Gul · Var försiktig (Internt)"}
+                      ? "Indikation: Röd · Kräver särskilt skydd"
+                      : "Indikation: Gul · Var försiktig (Internt)"}
                   </span>
                 </span>
                 <span>
@@ -1982,7 +1982,7 @@ export default function App() {
               </span>
               <span className="flagged-para-meta">
                 <span className="flagged-para-conf">
-                  {Math.round(f.confidence * 100)}% träffstyrka
+                  {Math.round(f.confidence * 100)}% likhet
                 </span>
               </span>
             </div>
@@ -2615,7 +2615,7 @@ export default function App() {
                 <header className="info-card-header">
                   <div className="info-card-header-top">
                     <span className="info-step-pill">
-                      Vägledande beslutsstöd · Lagring &amp; delning
+                      Lokalt beslutsstöd · Lagring &amp; delning
                     </span>
                   </div>
                   <h2 className="info-card-title">
@@ -2639,9 +2639,20 @@ export default function App() {
                       <dd>{infoReport.handling.examplesNote}</dd>
                     </div>
                   </dl>
-                  <p className="info-disclaimer">
-                    {infoReport.handling.disclaimer}
-                  </p>
+                  <div className="info-decision-callout" role="note">
+                    <Shield
+                      size={16}
+                      className="info-callout-icon"
+                      aria-hidden="true"
+                    />
+                    <p className="info-callout-text">
+                      <strong>
+                        Lokalt beslutsstöd — det är alltid du som fattar
+                        beslutet.
+                      </strong>{" "}
+                      {infoReport.handling.disclaimer}
+                    </p>
+                  </div>
                 </div>
               </article>
             </section>
@@ -2722,7 +2733,7 @@ export default function App() {
                         : infoEditedSinceScan
                         ? "Texten har ändrats sedan senaste klassificeringen — uppdatera för ny bedömning."
                         : charInfoFindings.length > 0
-                        ? "Originaltext (inga ord maskeras) — markerade avsnitt visar vad som gav utslag i klassningen."
+                        ? "Originaltext (inga ord maskeras) — markerade avsnitt visar vad som gav maskinellt utslag (bedöm alltid i sin helhet)."
                         : "Originaltext (inga ord maskeras) — inga gula eller röda avsnitt identifierades."}
                     </span>
                     <div className="review-header-actions">
@@ -2823,7 +2834,7 @@ export default function App() {
                       {infoReport && !infoEditedSinceScan && (
                         <>
                           {" "}
-                          · Klassning:{" "}
+                          · Maskinellt beslutsstöd:{" "}
                           <strong>{infoReport.badgeTitle}</strong>
                         </>
                       )}

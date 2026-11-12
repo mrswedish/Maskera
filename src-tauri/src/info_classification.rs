@@ -1,9 +1,28 @@
+use std::sync::LazyLock;
+
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::classifier::{
     clean_for_embedding, dot, is_standalone_heading, split_paragraphs, EmbeddingClassifier,
 };
 use crate::Match;
+
+/// Svenskt bankkontonummer med clearingnummer (t.ex. "8327-9, 123 456 789-0" eller "clearing 8105-9 konto 943 122 811-2")
+/// eller kontonummer angivet efter nyckelord som bankkonto/lönekonto/personkonto.
+static RE_PERSONAL_BANK_ACCOUNT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"(?ix)",
+        r"(?:\b\d{4}(?:-\d)?\s*[,/\s]\s*\d{2,3}[\s\-]?\d{3}[\s\-]?\d{3,4}(?:-\d)?\b)",
+        r"|(?:\b(?:bankkonto|personkonto|lönekonto|clearing(?:nr|nummer)?)\s*[:=]?\s*\d{4}(?:-\d)?[\s,\-/]+\d[\d\s\-]{5,14}\b)"
+    ))
+    .unwrap()
+});
+
+/// Markörer för publikt Bankgiro / Plusgiro (som ofta förekommer i gröna broschyrer och fakturainformation).
+static RE_PUBLIC_GIRO_CONTEXT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:bankgiro|plusgiro|\bbg\b|\bpg\b)\s*[:.]?\s*$").unwrap()
+});
 
 /// Övergripande informationsklassning enligt signalsystemet (Grön / Gul / Röd).
 /// Utformad som ett fristående datakontrakt som även kan exponeras via en central servertjänst (HTTP/JSON).
@@ -71,88 +90,99 @@ struct InfoPrototypeGroup {
     prompts: &'static [&'static str],
 }
 
-/// Ankare för RÖD och GUL informationsklassning (separata från AI-maskeringsläget).
+/// Ankare för RÖD och GUL informationsklassning enligt scenariobeskrivningen för trafikljusmodellen.
 const INFO_GROUPS: &[InfoPrototypeGroup] = &[
-    // ── RÖDA KATEGORIER (Information som kräver särskilt skydd) ──────────────
+    // ── RÖDA KATEGORIER (Sekretess enligt lag / kräver särskilt skydd) ────────
     InfoPrototypeGroup {
-        category: "Patient- & Hälsouppgifter",
+        category: "Patient-, Hälso- & Elevuppgifter",
         level: "red",
-        reason: "Innehåller medicinska uppgifter, diagnos, vårdplan, sjukskrivning eller behandling av enskild person.",
+        reason: "Innehåller hälso-/patientuppgifter, sjukskrivning eller individkopplade elevuppgifter som omfattas av sekretess eller särskilt skydd.",
         prompts: &[
             "Patientjournal för enskild patient, sjukdomshistoria, medicinsk diagnos, läkemedelsbehandling, psykiatrisk bedömning, sjukskrivning eller vårdkontakt.",
             "Beskrivning av en specifik persons fysiska eller psykiska hälsotillstånd, symtom, operation, provsvar, missbruk eller funktionsnedsättning.",
-            "Patienten vårdas på mottagning eller avdelning och genomgår medicinsk utredning, rehabilitering eller samtalsbehandling.",
+            "Individuella elevuppgifter inom skola eller folkhögskola, elevhälsa, åtgärdsprogram, särskilt stöd, kränkningsärende eller känsliga studieomdömen om enskild elev.",
         ],
     },
     InfoPrototypeGroup {
-        category: "Skyddade personuppgifter, Socialtjänst & Rättsväsende",
+        category: "Skyddade personuppgifter, Socialtjänst & Bakgrundskontroll",
         level: "red",
-        reason: "Berör skyddade personuppgifter, socialtjänst, orosanmälan, lagöverträdelse eller andra särskilt integritetskänsliga förhållanden.",
+        reason: "Berör skyddade personuppgifter, socialtjänst, orosanmälan, lagöverträdelse eller bakgrundskontroll av enskild individ.",
         prompts: &[
             "Skyddade personuppgifter, sekretessmarkering, skyddad folkbokföring, hotbild eller kvinnofrid.",
-            "Brottsmisstanke, polisanmälan, förundersökning, åtal, dom i brottmål, tvångsvård eller individutredning hos socialtjänsten.",
-            "Orosanmälan kring barn eller individ, ekonomiskt bistånd, omhändertagande enligt LVU eller LVM eller uppgifter om facklig, politisk eller religiös tillhörighet.",
+            "Brottsmisstanke, polisanmälan, förundersökning, åtal, dom i brottmål, belastningsregisterutdrag, bakgrundskontroll eller tvångsvård.",
+            "Orosanmälan kring barn eller individ, ekonomiskt bistånd, individutredning hos socialtjänsten eller omhändertagande enligt LVU eller LVM.",
         ],
     },
     InfoPrototypeGroup {
-        category: "Känsligt personalärende (HR)",
+        category: "Känsligt personalärende, Rehab, Löneunderlag & Avtal (HR)",
         level: "red",
-        reason: "Berör enskild medarbetares rehabilitering, sjukfrånvaro, arbetsrättsliga åtgärd, disciplinärende eller individuella anställningsvillkor.",
+        reason: "Berör rehabsamtal, sjukskrivning, disciplinärende, individuellt löneunderlag eller enskilt anställningsavtal.",
         prompts: &[
-            "Känsligt personalärende, rehabiliteringsutredning, upprepad korttidsfrånvaro, anpassning av arbetsuppgifter efter sjukskrivning eller läkarintyg för medarbetare.",
-            "Skriftlig erinran, varning, misskötsamhet, omplacering, arbetsrättslig förhandling, uppsägning, avsked eller konfliktutredning kring namngiven medarbetare.",
-            "Individuell lönesättning, löneöversyn för specifik anställd, kandidatbedömning med personliga omdömen eller psykologiskt testresultat i rekrytering.",
+            "Rehabsamtal, rehabiliteringsutredning för namngiven medarbetare, upprepad sjukfrånvaro, läkarintyg eller arbetsanpassning efter sjukskrivning.",
+            "Skriftlig erinran, varning, misskötsamhet, disciplinärende, uppsägning av personliga skäl, avsked eller facklig tvisteförhandling kring enskild anställd.",
+            "Individuellt löneunderlag med anställds månadslön, enskilt anställningsavtal med personliga villkor eller urvals- och bakgrundskontroll av namngiven kandidat.",
         ],
     },
     InfoPrototypeGroup {
-        category: "Sekretessbelagd upphandling & Affärshemligheter",
+        category: "Upphandlingssekretess, Affärshemligheter & Ej offentliggjord politik",
         level: "red",
-        reason: "Berör anbudssekretess, pågående upphandling före tilldelning, konfidentiella avtalsvillkor eller opublicerade ekonomiska uppgifter.",
+        reason: "Berör pågående upphandling under anbudssekretess, konfidentiella affärsvillkor eller politiskt beslutsunderlag före offentliggörande.",
         prompts: &[
             "Sekretessbelagda upphandlingsuppgifter, inkomna anbud under pågående anbudsutvärdering, anbudspriser eller utvärderingsprotokoll före tilldelningsbeslut.",
-            "Konfidentiell affärsstrategi, företagshemlighet, opublicerat bokslut, vinstmarginal, uppköpsbud, prissättningsmodell eller konfidentiellt avtal.",
+            "Konfidentiell affärsstrategi, företagshemlighet, opublicerat bokslut, vinstmarginal, uppköpsbud eller sekretessbelagt avtalsvillkor.",
+            "Politisk information före offentliggörande, konfidentiellt beredningsunderlag inför nämnd eller regionstyrelse, embargobelagt politiskt förslag eller ej offentliggjort beslut.",
         ],
     },
     InfoPrototypeGroup {
-        category: "Skyddsvärda säkerhetssystem & IT-säkerhet",
+        category: "Krisberedskap, Fysisk säkerhet (Lås & Larm) & IT-säkerhet",
         level: "red",
-        reason: "Innehåller skyddsvärda uppgifter om säkerhetssystem, behörigheter, sårbarheter, nätverksarkitektur eller inloggnings-/certifikatuppgifter.",
+        reason: "Innehåller uppgifter om krisberedskap, fysisk säkerhet (lås, larm, bevakning), inloggningsuppgifter/pinkoder eller tekniska sårbarheter och konfigurationer.",
         prompts: &[
-            "Skyddsvärda uppgifter om säkerhetssystem, fysiskt skalskydd, larmkoder, passersystem, reservkraft, säkerhetsskydd eller beredskapsplanering.",
-            "Teknisk sårbarhetsrapport, penetrationstest, brandväggsregler, intern nätverkstopologi, aktivt dataintrång eller oskyddad databas i produktionsmiljö.",
-            "Ditt SITHS eID certifikat på ditt SITHS-kort, tjänstekort, reservkort eller konsultkort med kortnummer, PIN-/PUK-kod eller inloggningscertifikat.",
+            "Krisberedskap, beredskapsplan för samhällsviktig verksamhet, krigsorganisation, reservkraft, nödvatten, kontinuitetsplanering eller allvarlig säkerhetsincident.",
+            "Fysisk säkerhet med lås och larm, larmkoder, pinkoder, lösenord, inloggningsuppgifter, bevakningsrutiner, kameraövervakning av skyddsobjekt eller skalskydd.",
+            "Känsliga tekniska konfigurationer, brandväggsregler, intern nätverkstopologi, sårbarhetsrapport, penetrationstest, SITHS-kort med PIN/PUK-kod eller säkerhetsincidenter.",
         ],
     },
 
-    // ── GULA KATEGORIER (Intern information att hantera med försiktighet) ────
+    // ── GULA KATEGORIER (Intern information inom region/avdelning/arbetsgrupp) ─
     InfoPrototypeGroup {
-        category: "APT- & Mötesanteckningar (Internt)",
+        category: "APT, Mötesanteckningar & Interna kursreferat",
         level: "yellow",
-        reason: "Liknar interna minnesanteckningar, APT-protokoll eller arbetsmötesunderlag som är avsedda för berörda kollegor men inte för fri spridning.",
+        reason: "Liknar interna APT-/mötesanteckningar eller en kollegas sammanfattning från kurs/seminarium avsedd för arbetsgruppen.",
         prompts: &[
-            "Minnesanteckningar från arbetsplatsträff APT, mötesanteckningar, intern dagordning, föregående protokoll, närvarande medarbetare, mötesledare och sekreterare.",
-            "Anteckningar från enhetsmöte, veckomöte, styrgruppsmöte eller arbetsgruppsmöte om pågående arbete, uppföljning och åtgärdspunkter inom verksamheten.",
+            "Minnesanteckningar från arbetsplatsträff APT, enhetsmöte, veckomöte eller arbetsgruppsmöte om pågående arbete, lokala rutiner och uppföljning.",
+            "Sammanfattning av kursen jag gick, egna anteckningar från seminarium, konferens eller föreläsning som delas med kollegorna i arbetsgruppen.",
         ],
     },
     InfoPrototypeGroup {
-        category: "Internt arbetsmaterial, Utkast & Planering",
+        category: "Internt arbetsmaterial, Styrdokument, Utkast & Planering",
         level: "yellow",
-        reason: "Liknar internt arbetsmaterial, ej färdigställt utkast, bemannings-/verksamhetsplanering eller intern rutin.",
+        reason: "Liknar interna arbetsinstruktioner, processbeskrivningar, schema/semesterplanering eller opublicerade utkast.",
         prompts: &[
-            "Internt arbetsmaterial, utkast till broschyr eller informationsblad under arbete, arbetskopia för synpunkter inför publicering eller internt diskussionsunderlag.",
-            "Verksamhetsläge och intern bemanningsplanering inför jul, nyår och semester, schemaförslag, täckning av arbetspass, intern arbetsfördelning och lokalanvändning.",
-            "Intern rutinbeskrivning, lathund för medarbetare på intranätet, intern projektplan, intern remissversion eller arbetsunderlag som inte är fastställt för allmänheten.",
+            "Internt arbetsmaterial eller utkast på dokument som ännu inte är beslutade, ekonomiskt, administrativt eller kommunikationsrelaterat arbetsutkast.",
+            "Interna styrdokument, arbetsinstruktioner, processbeskrivningar, kravspecifikationer eller lathund på intranätet för intern hantering inom avdelningen.",
+            "Schema, bemanning och semesterplanering inom arbetsgruppen, fördelning av pass inför jul och sommar eller allmän ärendeinformation utan utpekade individer.",
+        ],
+    },
+    InfoPrototypeGroup {
+        category: "Medarbetarsamtal (Kontrollera om innehållet är Rött)",
+        level: "yellow",
+        reason: "Vanliga medarbetarsamtal om mål och kompetensutveckling är normalt Gul information — men kontrollera noga: om samtalet berör ohälsa, sjukskrivning, rehab, individuell lön eller misskötsamhet ska det hanteras som RÖD.",
+        prompts: &[
+            "Mall och anteckningar från årligt medarbetarsamtal om kompetensutveckling, trivsel, arbetsmål och framtida utvecklingsplan på arbetsplatsen.",
         ],
     },
 ];
 
-/// Ankare för GRÖN (offentlig/publik) information som är avsedd att kunna spridas öppet.
+/// Ankare för GRÖN (offentlig/publik) information samt allmänna utbildnings-/metodbeskrivningar
+/// som inte innehåller intern eller sekretessbelagd verksamhetsinformation.
 const INFO_GREEN_PROMPTS: &[&str] = &[
-    "Publicerad broschyr för invånare, patientinformation för allmänheten, öppettider för mottagning eller besöksinformation på offentlig webbplats.",
-    "Offentlig tidtabell för kollektivtrafik, busslinjer, tågtider, biljettpriser och reseinformation för resenärer.",
-    "Publicerat pressmeddelande, offentlig nyhetsartikel, öppen inbjudan till publik konferens eller webbinarium för medborgare.",
-    "Publicerad verksamhetsbeskrivning, årsredovisning som offentliggjorts, kurskatalog för skola eller allmän informationstext på extern hemsida.",
-    "Allmän teknisk dokumentation för öppen källkod, generella skrivtips, recept eller offentlig myndighetsvägledning för allmänheten.",
+    "Publicerad informationsbroschyr för invånare, patientinformation för allmänheten, erbjudande, öppettider eller besöksinformation på extern webbplats.",
+    "Offentlig busstidtabell, tågtider, linjekarta, biljettpriser och reseinformation för kollektivtrafik på publik webb eller offentlig anslagstavla.",
+    "Publicerat pressmeddelande, offentlig nyhetsartikel, öppen inbjudan till publik konferens eller information på offentlig anslagstavla.",
+    "Publicerad verksamhetsbeskrivning, offentliggjord årsredovisning, öppen kurskatalog eller allmän informationstext som vi själva vill dela externt.",
+    "Allmän guide och metodtips om digitala möten, hybridmöten, mötesteknik, kameraplacering, ljud och ljus, moderatorns roll, breakout rooms, Menti och Miro.",
+    "Generella råd om mötesmetodik, ledarskap i mötesrummet, presentationsteknik, gruppdiskussioner, fysiska eller digitala möten och när olika mötesformer passar bäst.",
 ];
 
 /// Neutrala e-postfraser (t.ex. automatisk varningsrad för extern avsändare) som inte på egen hand ska höja klassningen.
@@ -259,7 +289,7 @@ fn is_public_service_phone(phone: &str) -> bool {
         || digits == "11414"
 }
 
-fn has_explicit_draft_markers(text: &str) -> bool {
+fn has_explicit_draft_or_internal_markers(text: &str) -> bool {
     let lower = text.to_lowercase();
     const MARKERS: &[&str] = &[
         "utkast",
@@ -271,36 +301,160 @@ fn has_explicit_draft_markers(text: &str) -> bool {
         "ej publicerad",
         "minnesanteckning",
         "arbetsplatsträff",
+        "arbetsinstruktion",
+        "semesterplanering",
+        "sammanfattning av kurs",
+        "kursen jag gick",
     ];
     MARKERS.iter().any(|m| lower.contains(m))
 }
 
+/// Identifierar om dokumentets inledning tydligt visar att helheten är ett kurs-/seminarie-/föreläsningsreferat
+/// eller en allmän metod-/utbildningstext (vilket ska motverka att lösryckta ord som "förhandling" eller
+/// "extern kompetens" i ett senare stycke feltolkas som ett skarpt Rött ärende).
+fn has_training_or_seminar_document_context(text: &str) -> bool {
+    let intro: String = text.chars().take(450).collect::<String>().to_lowercase();
+    const TRAINING_MARKERS: &[&str] = &[
+        "sammanfattning av kurs",
+        "kursen jag gick",
+        "anteckningar från kurs",
+        "seminarium",
+        "seminarie",
+        "föreläsning",
+        "webbinarium",
+        "utbildningsdag",
+        "kursreferat",
+        "workshopmetod",
+    ];
+    TRAINING_MARKERS.iter().any(|m| intro.contains(m))
+}
+
+/// Kontrollerar om ett stycke innehåller konkreta markörer för ett faktiskt rött ärende
+/// (så att en äkta sekretessnotis aldrig missas ens om den råkar klistras in i ett kursdokument).
+fn has_explicit_red_case_markers(slice: &str) -> bool {
+    let lower = slice.to_lowercase();
+    const RED_MARKERS: &[&str] = &[
+        "patient",
+        "diagnos",
+        "sjukskriv",
+        "läkarintyg",
+        "rehabsamtal",
+        "rehabiliterings",
+        "orosanmälan",
+        "socialtjänst",
+        "skyddade personuppgifter",
+        "sekretessmarkering",
+        "anbudspris",
+        "anbudssekretess",
+        "tilldelningsbeslut",
+        "larmkod",
+        "pinkod",
+        "lösenord",
+        "sårbarhet",
+        "krisberedskap",
+        "bakgrundskontroll",
+        "belastningsregister",
+        "anställningsavtal",
+        "löneunderlag",
+        "månadslön",
+        "skriftlig varning",
+        "disciplinärende",
+    ];
+    RED_MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// Hoppar över både enradiga rubriker och rena stolpordsstaplar utan meningsbyggnad
+/// (t.ex. Word-listor som "Framgångsfaktorer / Ljud / Ljus / Placering / Beteende / Roll").
+fn is_heading_or_keyword_stack(raw_slice: &str, clean_slice: &str) -> bool {
+    if is_standalone_heading(raw_slice, clean_slice) {
+        return true;
+    }
+
+    let lines: Vec<&str> = clean_slice
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return true;
+    }
+
+    // Om varje rad bara är korta nyckelord (<= 6 ord, genomsnitt <= 4 ord) och ingen rad avslutas med punkt/frågetecken/utropstecken
+    let any_sentence_punct = lines
+        .iter()
+        .any(|l| l.ends_with('.') || l.ends_with('!') || l.ends_with('?'));
+    if !any_sentence_punct && lines.len() >= 2 {
+        let word_counts: Vec<usize> = lines
+            .iter()
+            .map(|l| l.split_whitespace().count())
+            .collect();
+        let max_words = word_counts.iter().copied().max().unwrap_or(0);
+        let total_words: usize = word_counts.iter().sum();
+        if max_words <= 6 && total_words <= lines.len() * 4 {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Avgör om en `Konto/Giro`-träff avser ett personligt bankkonto/IBAN (Röd) eller ett giro i publik kontext.
+fn classify_account_matches(text: &str, structural_matches: &[Match]) -> (usize, usize) {
+    let mut red_bank_accounts = RE_PERSONAL_BANK_ACCOUNT.find_iter(text).count();
+    let mut yellow_giro = 0usize;
+
+    for m in structural_matches {
+        if m.label != "Konto/Giro" {
+            continue;
+        }
+        let upper = m.text.trim().to_ascii_uppercase();
+        if upper.starts_with("SE") && upper.len() >= 20 {
+            red_bank_accounts += 1;
+            continue;
+        }
+
+        // Kolla om numret föregås av "Bankgiro"/"Plusgiro"/"BG"/"PG" -> ofta publik betalningsinfo, ej Röd
+        let prefix_start = m.start.saturating_sub(24);
+        // Säkerställ giltig UTF-8-gräns bakåt
+        let mut safe_start = prefix_start;
+        while safe_start > 0 && !text.is_char_boundary(safe_start) {
+            safe_start -= 1;
+        }
+        let prefix = &text[safe_start..m.start];
+        if !RE_PUBLIC_GIRO_CONTEXT.is_match(prefix) {
+            yellow_giro += 1;
+        }
+    }
+
+    (red_bank_accounts, yellow_giro)
+}
+
 pub fn build_handling_guidance(level: &str) -> HandlingGuidance {
-    let disclaimer = "Vägledande lokalt beslutsstöd — stanna upp och stäm alltid av din slutliga bedömning mot verksamhetens fastställda styrdokument.".to_string();
+    let disclaimer = "Detta är en automatisk, maskinell bedömning — inte en fastställd sanning. Eftersom den lokala AI-modellen granskar texten stycke för stycke utan att fullt ut förstå sammanhanget kan enstaka ord ge för högt eller för lågt utslag. Väg alltid in dokumentets helhet och syfte mot verksamhetens styrdokument.".to_string();
 
     match level {
         "red" => HandlingGuidance {
             heading: "Hur bör röd information hanteras?".to_string(),
-            summary: "Information som kräver särskilt skydd eftersom den kan orsaka skada för en enskild person, verksamheten eller organisationen om den hamnar i fel händer.".to_string(),
-            storage_guidance: "Lagring: Spara endast i avsett verksamhetssystem, diarium eller särskilt behörighetsstyrd yta — inte på öppna eller breda samarbetsytor.".to_string(),
-            sharing_guidance: "Delning: Dela endast med specifikt behöriga mottagare via säkra kanaler enligt verksamhetens rutiner. Klistra aldrig in omaskerad i öppna AI-tjänster.".to_string(),
-            examples_note: "Typexempel på Röd: Patientuppgifter, skyddade personuppgifter, sekretessbelagda upphandlingsuppgifter, känsliga personalärenden och skyddsvärda uppgifter om säkerhetssystem.".to_string(),
+            summary: "Röd information omfattas ofta av sekretess enligt lag eller kräver särskilt skydd eftersom den kan orsaka skada för enskild person, verksamheten eller regionen.".to_string(),
+            storage_guidance: "Spara endast i avsett verksamhetssystem, diarium eller särskilt behörighetsstyrd yta — aldrig på öppna eller breda samarbetsytor.".to_string(),
+            sharing_guidance: "Dela endast med specifikt behöriga mottagare via godkända, säkra kanaler. Klistra aldrig in omaskerad i öppna AI-tjänster.".to_string(),
+            examples_note: "Typexempel på Röd: Patient- och elevuppgifter, rehabsamtal, sjukskrivningar, löneunderlag, anställningsavtal, bakgrundskontroller, pågående upphandlingar, politiskt underlag före offentliggörande, krisberedskap samt lås, larm och lösenord.".to_string(),
             disclaimer,
         },
         "yellow" => HandlingGuidance {
             heading: "Hur bör gul information hanteras?".to_string(),
-            summary: "Information som används internt och som vi behöver vara försiktiga med. Den kan delas med rätt personer, men inte spridas fritt hur som helst.".to_string(),
-            storage_guidance: "Lagring: Spara i interna arbetsytor med rätt behörighetskrets — inte på ytor som är öppna för hela organisationen eller publikt åtkomliga.".to_string(),
-            sharing_guidance: "Delning: Kan delas med berörda kollegor och parter som behöver underlaget i arbetet, men kontrollera mottagarkretsen innan du delar vidare.".to_string(),
-            examples_note: "Typexempel på Gul: Vanliga APT-anteckningar, interna arbetsmaterial, utkast till broschyrer, interna planeringar och mötesunderlag utan särskilt skyddsvärda uppgifter.".to_string(),
+            summary: "Gul information är intern arbetsinformation som vi vill hålla inom regionen, avdelningen eller arbetsgruppen — den kan delas med rätt personer men inte spridas fritt.".to_string(),
+            storage_guidance: "Spara i verksamhetens avsedda interna samarbetsytor med rätt behörighetsstyrning för gruppen — inte på ytor som är öppna för alla eller externt.".to_string(),
+            sharing_guidance: "Kan delas med berörda kollegor som behöver underlaget i arbetet. Kontrollera mottagare innan du delar — och tänk på att t.ex. medarbetarsamtal blir Röda om de innehåller rehab-, hälso- eller löneuppgifter.".to_string(),
+            examples_note: "Typexempel på Gul: APT- och mötesanteckningar, arbetsmaterial och utkast, arbetsinstruktioner, processbeskrivningar, schema/semesterplanering, kursreferat samt opublicerade arbetskontaktuppgifter.".to_string(),
             disclaimer,
         },
         _ => HandlingGuidance {
             heading: "Hur får grön information hanteras?".to_string(),
-            summary: "Information som är avsedd att vara offentlig och kan delas öppet utan särskild risk.".to_string(),
-            storage_guidance: "Lagring: Kan lagras i öppna eller gemensamma samarbetsytor samt publiceras på externa webbplatser.".to_string(),
-            sharing_guidance: "Delning: Kan spridas öppet både internt och externt (kontrollera dock alltid att dokumentet verkligen är färdigställt och godkänt för publicering).".to_string(),
-            examples_note: "Typexempel på Grön: Publicerade broschyrer, tidtabeller, offentligt informationsmaterial och publicerade verksamhetsbeskrivningar.".to_string(),
+            summary: "Grön information är sådant vi själva avser att dela öppet utan särskild risk.".to_string(),
+            storage_guidance: "Kan lagras i gemensamma ytor och publiceras på extern webbplats eller offentliga anslagstavlor när materialet är beslutat och klargjort för publicering.".to_string(),
+            sharing_guidance: "Kan spridas öppet. Obs: Att en handling är allmän och kan begäras ut är inte detsamma som att informationen är öppen för fri publicering — vid utlämnande görs alltid en sekretessbedömning i det enskilda fallet.".to_string(),
+            examples_note: "Typexempel på Grön: Busstidtabeller, publicerade informationsbroschyrer, erbjudanden och godkänt material på extern webbplats.".to_string(),
             disclaimer,
         },
     }
@@ -327,7 +481,6 @@ where
     let mut person_count = 0usize;
     let mut personal_email_count = 0usize;
     let mut personal_phone_count = 0usize;
-    let mut account_count = 0usize;
 
     for m in structural_matches {
         match m.label.as_str() {
@@ -352,12 +505,15 @@ where
                     personal_phone_count += 1;
                 }
             }
-            "Konto/Giro" => account_count += 1,
             _ => {}
         }
     }
 
-    // 2. Semantisk avsnittsanalys (Lager 3 — EmbeddingGemma 2) mot Grön / Gul / Röd
+    let (red_bank_account_count, yellow_giro_count) =
+        classify_account_matches(text, structural_matches);
+
+    // 2. Dokumentövergripande kontext + Semantisk avsnittsanalys (Lager 3 — EmbeddingGemma 2)
+    let seminar_doc_context = has_training_or_seminar_document_context(text);
     let mut section_findings: Vec<InfoSectionFinding> = Vec::new();
     let mut paragraphs_scanned = 0usize;
 
@@ -384,11 +540,11 @@ where
                     .zip(cleaned_queries.iter())
                     .zip(vecs)
                 {
-                    if is_standalone_heading(raw_slice, clean) {
+                    if is_heading_or_keyword_stack(raw_slice, clean) {
                         continue;
                     }
 
-                    // Hoppa över ren standardiserad e-postvarningsfot ("Detta e-postmeddelande kommer från en avsändare utanför...")
+                    // Hoppa över ren standardiserad e-postvarningsfot
                     let boilerplate_sim = idx
                         .boilerplate_vecs
                         .iter()
@@ -420,33 +576,75 @@ where
                     }
 
                     let y_sim_val = best_yellow.map(|(_, s)| s).unwrap_or(f32::NEG_INFINITY);
+                    let explicit_red_in_slice = has_explicit_red_case_markers(raw_slice);
 
-                    // Pröva RÖD först: måste slå både gröna ankare och inte vara tydligt närmare ett vanligt gult APT-/planeringsankare
-                    let mut matched_group: Option<(usize, &'static str, f32)> = None;
+                    let mut matched_finding: Option<(String, &'static str, f32, String)> = None;
+
                     if let Some((r_idx, r_sim)) = best_red {
                         let margin_vs_green = r_sim - green_best;
                         let margin_vs_yellow = r_sim - y_sim_val;
-                        if r_sim >= 0.76 && margin_vs_green >= 0.032 && margin_vs_yellow >= -0.005 {
+
+                        // Om dokumentet i sin helhet är ett kurs-/seminariereferat och stycket saknar
+                        // skarpa ärendeord krävs mycket hög likhet för att fälla dokumentet som RÖD.
+                        let strong_red = if seminar_doc_context && !explicit_red_in_slice {
+                            r_sim >= 0.845 && margin_vs_green >= 0.075 && margin_vs_yellow >= 0.025
+                        } else if explicit_red_in_slice {
+                            r_sim >= 0.770 && margin_vs_green >= 0.032 && margin_vs_yellow >= 0.002
+                        } else {
+                            (r_sim >= 0.805 && margin_vs_green >= 0.050 && margin_vs_yellow >= 0.012)
+                                || (r_sim >= 0.835 && margin_vs_green >= 0.038 && margin_vs_yellow >= 0.008)
+                        };
+
+                        if strong_red {
+                            let grp = &INFO_GROUPS[r_idx];
                             let conf =
-                                (0.64 + ((margin_vs_green - 0.032) / 0.090) * 0.34).clamp(0.64, 0.98);
-                            matched_group = Some((r_idx, "red", conf));
+                                (0.68 + ((margin_vs_green - 0.035) / 0.090) * 0.28).clamp(0.68, 0.98);
+                            matched_finding = Some((
+                                grp.category.to_string(),
+                                "red",
+                                conf,
+                                grp.reason.to_string(),
+                            ));
+                        } else if !seminar_doc_context
+                            && r_sim >= 0.780
+                            && margin_vs_green >= 0.036
+                            && margin_vs_yellow >= 0.005
+                        {
+                            // Gråzonsträff: liknar rött ämnesområde men når inte tröskeln för säker RÖD -> flagga som GUL gränsfallskontroll
+                            let grp = &INFO_GROUPS[r_idx];
+                            let conf =
+                                (0.58 + ((margin_vs_green - 0.032) / 0.080) * 0.22).clamp(0.58, 0.78);
+                            matched_finding = Some((
+                                format!("Gränsfall — {}", grp.category),
+                                "yellow",
+                                conf,
+                                format!(
+                                    "Maskinell gränsfallsträff: Avsnittet innehåller ord som kan förekomma inom '{}', men kopplingen är inte entydig. Bedöm utifrån dokumentets helhet om detta avser ett verkligt ärende (Röd) eller generell/intern beskrivning (Gul).",
+                                    grp.category
+                                ),
+                            ));
                         }
                     }
 
-                    // Annars pröva GUL (interna APT-/mötesanteckningar, utkast, planering)
-                    if matched_group.is_none() {
+                    // Annars pröva GUL (interna APT-/mötesanteckningar, utkast, arbetsinstruktioner, kursreferat, medarbetarsamtal)
+                    if matched_finding.is_none() {
                         if let Some((y_idx, y_sim)) = best_yellow {
                             let margin_vs_green = y_sim - green_best;
-                            if y_sim >= 0.75 && margin_vs_green >= 0.020 {
-                                let conf = (0.60 + ((margin_vs_green - 0.020) / 0.090) * 0.34)
+                            if y_sim >= 0.755 && margin_vs_green >= 0.022 {
+                                let grp = &INFO_GROUPS[y_idx];
+                                let conf = (0.60 + ((margin_vs_green - 0.022) / 0.090) * 0.34)
                                     .clamp(0.60, 0.96);
-                                matched_group = Some((y_idx, "yellow", conf));
+                                matched_finding = Some((
+                                    grp.category.to_string(),
+                                    "yellow",
+                                    conf,
+                                    grp.reason.to_string(),
+                                ));
                             }
                         }
                     }
 
-                    if let Some((g_idx, level, conf)) = matched_group {
-                        let grp = &INFO_GROUPS[g_idx];
+                    if let Some((category, level, conf, reason)) = matched_finding {
                         let clean_line = clean.replace('\n', " ");
                         let preview: String = clean_line.chars().take(135).collect();
                         let preview = if clean_line.chars().count() > 135 {
@@ -460,10 +658,10 @@ where
                             preview,
                             start: byte_start,
                             end: byte_end,
-                            category: grp.category.to_string(),
+                            category,
                             level: level.to_string(),
                             confidence: conf,
-                            reason: grp.reason.to_string(),
+                            reason,
                         });
                     }
                 }
@@ -479,7 +677,15 @@ where
             level: "red".to_string(),
             source: "struktur".to_string(),
             title: format!("{pnr_count} personnummer / samordningsnummer"),
-            detail: "Direkta identitetsbeteckningar kräver normalt särskilt skydd och behörighetsstyrning.".to_string(),
+            detail: "Särskilt skyddsvärd personidentitet — omfattas normalt av strängare behörighets- och lagringskrav.".to_string(),
+        });
+    }
+    if red_bank_account_count > 0 {
+        signals.push(InfoSignal {
+            level: "red".to_string(),
+            source: "struktur".to_string(),
+            title: format!("{red_bank_account_count} bankkontonummer / IBAN"),
+            detail: "Personliga bankkontouppgifter räknas som särskilt skyddsvärda uppgifter (till skillnad från öppna Bankgiro/Plusgiro för inbetalning).".to_string(),
         });
     }
     if card_count > 0 {
@@ -487,15 +693,15 @@ where
             level: "red".to_string(),
             source: "struktur".to_string(),
             title: format!("{card_count} kortnummer (tjänste-/SITHS- eller betalkort)"),
-            detail: "Kortnummer för e-legitimation eller betalning ska inte spridas i öppna ytor.".to_string(),
+            detail: "Kortnummer för e-legitimation eller betalning ska inte lagras eller spridas i öppna ytor.".to_string(),
         });
     }
     if secret_key_count > 0 {
         signals.push(InfoSignal {
             level: "red".to_string(),
             source: "struktur".to_string(),
-            title: format!("{secret_key_count} teknisk nyckel / behörighetskod (t.ex. API-nyckel eller HSA-ID)"),
-            detail: "Tekniska nycklar, certifikat och behörighetsidentifierare kräver särskilt skydd.".to_string(),
+            title: format!("{secret_key_count} lösenord, teknisk nyckel eller behörighetskod"),
+            detail: "Inloggningsuppgifter, tekniska nycklar och behörighetsidentifierare kräver särskilt skydd.".to_string(),
         });
     }
 
@@ -519,7 +725,7 @@ where
             level: "red".to_string(),
             source: "kontext".to_string(),
             title: format!(
-                "{} avsnitt med särskilt skyddsvärt innehåll ({})",
+                "{} avsnitt med indikerat rött innehåll ({})",
                 red_sections.len(),
                 cats.join(", ")
             ),
@@ -544,12 +750,12 @@ where
             ),
             detail: yellow_sections[0].reason.clone(),
         });
-    } else if has_explicit_draft_markers(text) {
+    } else if has_explicit_draft_or_internal_markers(text) {
         signals.push(InfoSignal {
             level: "yellow".to_string(),
             source: "struktur".to_string(),
-            title: "Markering för utkast / internt arbetsmaterial".to_string(),
-            detail: "Texten innehåller ord som 'utkast', 'arbetsmaterial' eller 'minnesanteckning', vilket normalt innebär att den är avsedd för internt bruk.".to_string(),
+            title: "Markering för utkast, kursanteckning eller internt arbetsmaterial".to_string(),
+            detail: "Texten innehåller uttryck som tyder på internt arbetsmaterial, utkast eller egna anteckningar för arbetsgruppen.".to_string(),
         });
     }
 
@@ -558,67 +764,68 @@ where
             level: "yellow".to_string(),
             source: "struktur".to_string(),
             title: format!("{internal_url_count} intern intranät- eller systemlänk"),
-            detail: "Hänvisar till interna sidor eller arbetsytor som inte är avsedda för extern spridning.".to_string(),
+            detail: "Hänvisar till intranät eller interna arbetsytor som inte är avsedda för extern spridning.".to_string(),
         });
     }
 
-    let pii_contact_total = person_count + personal_email_count + personal_phone_count + account_count;
+    let pii_contact_total =
+        person_count + personal_email_count + personal_phone_count + yellow_giro_count;
     if pii_contact_total > 0 {
         let mut parts = Vec::new();
         if person_count > 0 {
             parts.push(format!("{person_count} personnamn"));
         }
         if personal_email_count > 0 {
-            parts.push(format!("{personal_email_count} e-postadress(er)"));
+            parts.push(format!("{personal_email_count} arbetsepost/e-post"));
         }
         if personal_phone_count > 0 {
             parts.push(format!("{personal_phone_count} telefonnummer"));
         }
-        if account_count > 0 {
-            parts.push(format!("{account_count} konto-/gironummer"));
+        if yellow_giro_count > 0 {
+            parts.push(format!("{yellow_giro_count} giro-/betalningsuppgift"));
         }
         signals.push(InfoSignal {
             level: "yellow".to_string(),
             source: "struktur".to_string(),
-            title: format!("Person- och kontaktuppgifter ({})", parts.join(", ")),
-            detail: "Dokument med namngivna personer eller direkta kontaktuppgifter bör hanteras med omsorg även när de saknar sekretessuppgifter.".to_string(),
+            title: format!("Icke-publicerade person-/kontaktuppgifter ({})", parts.join(", ")),
+            detail: "Harmlösa men personkopplade uppgifter (t.ex. namn, arbetsepost eller arbetstelefon i interna dokument) hanteras normalt som Gul information om dokumentet inte är avsett för offentlig publicering.".to_string(),
         });
     }
 
-    // 4. Avgör total nivå (RÖD > GUL > GRÖN)
+    // 4. Avgör maskinellt beslutsförslag (RÖD > GUL > GRÖN)
     let has_red = signals.iter().any(|s| s.level == "red");
     let has_yellow = signals.iter().any(|s| s.level == "yellow");
 
     let (level, badge_title, content_headline, content_explanation) = if has_red {
         (
             "red".to_string(),
-            "RÖD — Kräver särskilt skydd".to_string(),
-            "RÖD: Information som kräver särskilt skydd".to_string(),
-            "Dokumentet innehåller uppgifter eller avsnitt som kan orsaka skada för en enskild person, verksamheten eller organisationen om de hamnar i fel händer.".to_string(),
+            "Förslag: RÖD — Kräver särskilt skydd".to_string(),
+            "Maskinell bedömning: Indikerar RÖD information".to_string(),
+            "Analysen hittade uppgifter eller avsnitt som liknar sekretessbelagd eller särskilt skyddsvärd information. Kontrollera de markerade avsnitten i sitt sammanhang nedan.".to_string(),
         )
     } else if has_yellow {
         (
             "yellow".to_string(),
-            "GUL — Var försiktig (Internt)".to_string(),
-            "GUL: Information som vi behöver vara försiktiga med".to_string(),
-            "Dokumentet bedöms innehålla intern arbetsinformation, mötesanteckningar, utkast eller personuppgifter som inte är avsedda att spridas fritt utan eftertanke.".to_string(),
+            "Förslag: GUL — Intern försiktighet".to_string(),
+            "Maskinell bedömning: Indikerar GUL (intern) information".to_string(),
+            "Analysen tyder på internt arbetsmaterial, mötes-/kursanteckningar, utkast eller opublicerade kontaktuppgifter som bör hållas inom behörig krets.".to_string(),
         )
     } else {
         signals.push(InfoSignal {
             level: "green".to_string(),
             source: "kontext".to_string(),
-            title: "Inga skyddsvärda eller interna markörer upptäcktes".to_string(),
+            title: "Inga röda eller gula markörer upptäcktes i styckena".to_string(),
             detail: if semantic_available {
-                "Varken känsliga sakavsnitt, interna utkastmarkörer, personnummer eller personkopplade uppgifter hittades i texten.".to_string()
+                "Varken skyddsvärda sakavsnitt, interna utkastmarkörer, personnummer, bankkonton eller personkopplade kontaktuppgifter identifierades.".to_string()
             } else {
-                "Inga personnummer, kortnummer, nycklar eller utkastmarkörer hittades (aktivera lokal AI för djup kontextanalys).".to_string()
+                "Inga personnummer, bankkonton, kortnummer, nycklar eller utkastmarkörer hittades (aktivera lokal AI för semantisk avsnittsanalys).".to_string()
             },
         });
         (
             "green".to_string(),
-            "GRÖN — Kan delas öppet".to_string(),
-            "GRÖN: Information som kan delas öppet".to_string(),
-            "Dokumentet liknar offentlig eller allmän information utan identifierade skyddsvärda eller interna uppgifter.".to_string(),
+            "Förslag: GRÖN — Kan delas öppet".to_string(),
+            "Maskinell bedömning: Indikerar GRÖN information".to_string(),
+            "Texten liknar offentlig eller allmän information utan identifierade interna eller särskilt skyddsvärda uppgifter (förutsatt att materialet är avsett att publiceras).".to_string(),
         )
     };
 
@@ -657,73 +864,217 @@ mod tests {
 
         let clf = EmbeddingClassifier::load(&dir).expect("load EmbeddingGemma 2");
 
-        // 1. GRÖN: Publicerad tidtabell / offentligt informationsmaterial
+        // 1. GRÖN: Publicerad tidtabell / offentlig broschyr (inkl. publikt Bankgiro & kundtjänst)
         let green_doc = "\
 Välkommen till länstrafikens vintertidtabell!\n\n\
 Från och med den 15 december gäller nya avgångstider för regionbussarna mellan resecentrum och kransorterna. Bussarna i rusningstrafik avgår nu var tionde minut för att ge pendlare och skolungdomar en smidigare resa.\n\n\
-Du kan ladda ner hela tidtabellen som broschyr på vår webbplats eller kontakta kundtjänst om du har allmänna frågor om våra biljetter.";
-        let green_rep = classify_information_text(green_doc, &[], Some(&clf), |_, _| {});
+Du kan ladda ner hela tidtabellen som broschyr på vår webbplats, betala företagskort via Bankgiro 5402-1234 eller mejla kundtjanst@lanstrafiken.se vid allmänna frågor.";
+        let green_matches = vec![
+            Match {
+                text: "5402-1234".to_string(),
+                label: "Konto/Giro".to_string(),
+                start: green_doc.find("5402-1234").unwrap(),
+                end: green_doc.find("5402-1234").unwrap() + 9,
+                source: "regex".to_string(),
+            },
+            Match {
+                text: "kundtjanst@lanstrafiken.se".to_string(),
+                label: "E-post".to_string(),
+                start: green_doc.find("kundtjanst@lanstrafiken.se").unwrap(),
+                end: green_doc.find("kundtjanst@lanstrafiken.se").unwrap() + 26,
+                source: "regex".to_string(),
+            },
+        ];
+        let green_rep = classify_information_text(green_doc, &green_matches, Some(&clf), |_, _| {});
         println!(
-            "GRÖN test => level={}, signals={:?}",
+            "1. GRÖN test => level={}, signals={:?}",
             green_rep.level,
             green_rep.signals.iter().map(|s| &s.title).collect::<Vec<_>>()
         );
         assert_eq!(
             green_rep.level, "green",
-            "Offentlig broschyr/tidtabell ska klassas som GRÖN"
+            "Offentlig broschyr/tidtabell med publikt Bankgiro ska klassas som GRÖN"
         );
 
-        // 2. GUL: Vanlig APT-minnesanteckning med bemanningsplanering (ej patientdata)
+        // 2. GUL (Verkligt regressionsfall): "Hybridmöten seminarie 210825.docx" med Word-\n\n mellan alla rader!
+        let hybrid_raw_lines = "\
+Hybridmöten Erik Mattson Ordrum 210824
+Sammanfattning av kursen jag gick Såg den först när jag börjat anteckna. Kanske blir lite upprepningar men det får ni ha överinseende med. Finns även med saker jag inte hann med att anteckna.
+Definition hybridmöte
+https://www.svenskamoten.se/nyheter/digitala-moten-studios-hybridmoten-digitala-events-livestreams-vad-ar-vad/
+Möjligheter
+Fler kan vara med
+Möjlighet till delvis parallella möten. Alla behöver inte göra samma sak.
+Fallgropar
+De som är på plats kan få mer makt.
+De som är på plats kan känns sig störda av de som är med digitalt
+Teknikberoende
+Möjligheter
+Mötesledare viktig. Måste vara mer aktiv än vid vanligt möte.
+Ledaren har en viktig uppgift i att sammanlänka.
+Ibland krävs 2 ledare. En fysisk och en digital som håller koll på chatt etc
+Planering
+Syfte och mål
+Verktyg och plattform
+Fördela ansvaret
+Se över teknikbehov. Viktigt med både bra ljud och bild
+Håll det kort. De som är med på distans har en annan tidsuppfattning. Undvik om möjligt att köra heldagsseminarier.
+Arbeta med variation
+Zoom, nytt sedan i somras. Menti app går lägga in direkt i Zoom.
+Mötesrummet
+Extra mikrofon är viktigt. Alternativt för mötesledare repetera frågor och svar
+Olika exempel på utformning av mötesrum gicks igenom (se bilder i första länken)
+Skillnad på utformning beroende på hur många deltagare som medverkar. Stående eller sittande ledare. Ledarens placering. Vi mellanstora hybridmöten (ca 25 st medverkande fysiskt) rekommenderas en talyta i mitten med egen skärm. Större hybridmöten typ 100 medverkande fysiskt liknar mer en TV produktion och där kanske man måste anlita extern kompetens om inte kompetensen finns i organisationen. Parallella sejourer. Ofta behov av programledare. Interaktivitetskrav påverkar utformningen.
+Mötesmetoder
+Samtala
+Involvera
+Inspirera
+Bearbeta
+Värdera
+- Blixtintervju, moderator ställer frågor direkt, börja alltid med dem som inte är i rummet
+- Gruppsamtal, break out rooms. Går även använda telefoner, surfplattor, facetime
+- Parpromenad, som ett inslag i hybridmötet
+- Dialog, fysiskt och/eller digitala whitboards. Tips miro.com mural.co .
+- Värdering. T.ex menti
+Framgångsfaktorer digitalt förhållningssätt
+Ljud
+Ljus
+Placering
+Beteende
+Roll, privat eller professionell
+Framgångsfaktor fysiskt förhållningssätt
+Kom ihåg dem som medverkar digitalt
+Tala till kameran och använd mikrofon när du ska säga något
+Mötesdisciplin/mötesregler
+Avbryt som talar för mycket
+Regeltavla t.ex kamera på
+Snabba åtgärder
+Klargör syfte och formalia
+Börja med distansdeltagarna
+Repetera frågor och svar
+Tänk parallella sejourer
+Övrigt
+Vid viss avancerade möten är hybridmöten inte att föredra som första alternativ. Kan t.ex gälla förhandlingar. Kanske bättre att köra fysiskt eller helt digitalt.";
+        let hybrid_docx_style = hybrid_raw_lines.lines().collect::<Vec<_>>().join("\n\n");
+        let hybrid_matches = vec![Match {
+            text: "Erik Mattson".to_string(),
+            label: "Person".to_string(),
+            start: 12,
+            end: 24,
+            source: "ner".to_string(),
+        }];
+        let hybrid_rep =
+            classify_information_text(&hybrid_docx_style, &hybrid_matches, Some(&clf), |_, _| {});
+        println!(
+            "2. HYBRIDMÖTEN seminarie (.docx-stil) => level={}, findings={:?}",
+            hybrid_rep.level,
+            hybrid_rep
+                .section_findings
+                .iter()
+                .map(|f| (f.paragraph_index, &f.category, &f.level, f.confidence))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            hybrid_rep.level, "yellow",
+            "Sammanfattning av kurs om hybridmöten får ALDRIG klassas som RÖD — ska landa på GUL!"
+        );
+        assert!(
+            hybrid_rep.section_findings.iter().all(|f| f.level != "red"),
+            "Inga röda avsnitt får triggas i hybridmötesdokumentet"
+        );
+
+        // 3. GUL: Vanlig APT-minnesanteckning + semesterplanering
         let apt_doc = "\
 **MINNESANTECKNINGAR – ARBETSPLATSTRÄFF (APT)**\n\n\
 * **Enhet:** Vårdcentralen Centrum\n\
 * **Datum och tid:** 2026-11-11, kl. 13:00–14:30\n\
 * **Plats:** Konferensrum Eken / Digitalt via intern videolänk\n\
 * **Närvarande:** 18 medarbetare\n\n\
-## 1. Verksamhetsläge och bemanning inför jul och nyår\n\n\
-Beläggningen i telefonrådgivningen ligger något högre än motsvarande vecka föregående år. Förslag till slutligt julschema ligger i den interna schemamappen och eventuella byten av pass läggs in senast fredag innan schemat låses.";
+## 1. Verksamhetsläge och semesterplanering\n\n\
+Beläggningen i telefonrådgivningen ligger något högre än motsvarande vecka föregående år. Utkast till arbetsinstruktioner och sommarens semesterplanering ligger i den interna mappen på intranätet.";
         let apt_rep = classify_information_text(apt_doc, &[], Some(&clf), |_, _| {});
+        println!("3. GUL APT test => level={}", apt_rep.level);
+        assert_eq!(apt_rep.level, "yellow");
+
+        // 4. GUL: Allmänt medarbetarsamtal (utan rehab/sjukdom/lön)
+        let medarb_doc = "\
+Underlag inför årligt medarbetarsamtal på enheten.\n\n\
+Vi går igenom hur arbetsåret har fungerat, trivsel i arbetsgruppen, önskemål om kompetensutveckling och mål för kommande år.";
+        let medarb_rep = classify_information_text(medarb_doc, &[], Some(&clf), |_, _| {});
         println!(
-            "GUL APT test => level={}, findings={:?}",
-            apt_rep.level,
-            apt_rep
+            "4. GUL Medarbetarsamtal => level={}, findings={:?}",
+            medarb_rep.level,
+            medarb_rep
                 .section_findings
                 .iter()
-                .map(|f| (&f.category, &f.level, f.confidence))
+                .map(|f| (&f.category, &f.level))
                 .collect::<Vec<_>>()
         );
         assert_eq!(
-            apt_rep.level, "yellow",
-            "Vanlig APT-minnesanteckning och bemanningsplanering ska klassas som GUL (och varken Grön eller Röd!)"
+            medarb_rep.level, "yellow",
+            "Allmänt medarbetarsamtal om kompetensutveckling ska klassas som GUL"
         );
 
-        // 3. RÖD: Känsligt personalärende (rehabilitering / varning) — ska bli RÖD enligt mötesmodellen
+        // 5. RÖD: Känsligt personalärende (rehabsamtal / sjukskrivning)
         let hr_red_doc = "\
-Anteckning från rehabiliteringsmöte avseende medarbetare på enheten.\n\n\
+Anteckning från rehabsamtal avseende medarbetare på enheten.\n\n\
 Medarbetaren har varit sjukskriven på halvtid under hösten på grund av utmattningssymtom och läkarintyg har inkommit. Vi upprättar en individuell plan för arbetsanpassning och uppföljning med företagshälsovården.";
         let hr_rep = classify_information_text(hr_red_doc, &[], Some(&clf), |_, _| {});
-        println!(
-            "RÖD HR test => level={}, findings={:?}",
-            hr_rep.level,
-            hr_rep
-                .section_findings
-                .iter()
-                .map(|f| (&f.category, &f.level, f.confidence))
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(
-            hr_rep.level, "red",
-            "Känsligt personal-/rehabärende ska klassas som RÖD"
-        );
+        assert_eq!(hr_rep.level, "red");
 
-        // 4. RÖD: Sekretessbelagd upphandling under pågående utvärdering
+        // 6. RÖD: Pågående upphandling under anbudssekretess
         let proc_red_doc = "\
 Utvärderingsunderlag inför tilldelningsbeslut — pågående upphandling av medicinteknisk utrustning (omfattas av absolut anbudssekretess).\n\n\
 Leverantör A har lämnat ett konfidentiellt anbudspris om 14,2 MSEK med 18 procents volymrabatt, medan Leverantör B ligger på 16,8 MSEK före förhandling.";
         let proc_rep = classify_information_text(proc_red_doc, &[], Some(&clf), |_, _| {});
-        assert_eq!(
-            proc_rep.level, "red",
-            "Pågående upphandling med anbudspriser ska klassas som RÖD"
+        assert_eq!(proc_rep.level, "red");
+
+        // 7. RÖD: Krisberedskap samt fysisk säkerhet (lås & larm)
+        let sec_red_doc = "\
+Beredskapsplan och skalskyddsrutin för tekniska försörjningsbyggnaden.\n\n\
+Reservkraftaggregatet testkörs varje månad. Larmkod för nattlarm i sektion B byts kvartalsvis och huvudnycklar till lås och passersystem kvitteras ut i säkerhetsskåpet.";
+        let sec_rep = classify_information_text(sec_red_doc, &[], Some(&clf), |_, _| {});
+        println!("7. RÖD Beredskap/Lås & larm => level={}", sec_rep.level);
+        assert_eq!(sec_rep.level, "red");
+
+        // 8. RÖD: Privat bankkontonummer i annars harmlös utbetalningsnotis
+        let bank_doc = "Utbetalning av ersättning sker till medborgarens bankkonto 8327-9, 123 456 789-0 nästa vecka.";
+        let bank_rep = classify_information_text(bank_doc, &[], Some(&clf), |_, _| {});
+        println!(
+            "8. RÖD Bankkonto => level={}, signals={:?}",
+            bank_rep.level,
+            bank_rep.signals.iter().map(|s| &s.title).collect::<Vec<_>>()
+        );
+        assert_eq!(bank_rep.level, "red");
+
+        // 9. RÖD: Politisk information före offentliggörande + Elevuppgifter
+        let pol_doc = "\
+Konfidentiellt beredningsunderlag inför regionstyrelsens arbetsutskott (ej offentliggjort förslag).\n\n\
+Förslaget innebär en omstrukturering av tre enheter och omfattas av sekretess under pågående politisk beredning fram till offentliggörandet nästa månad.";
+        let pol_rep = classify_information_text(pol_doc, &[], Some(&clf), |_, _| {});
+        println!("9. RÖD Politik före offentliggörande => level={}", pol_rep.level);
+        assert_eq!(pol_rep.level, "red");
+
+        let elev_doc = "\
+Minnesanteckning från elevhälsoteamet gällande elev i årskurs 2.\n\n\
+Eleven har haft hög frånvaro under terminen och utreds för behov av särskilt stöd samt anpassad studiegång i samråd med skolpsykolog.";
+        let elev_rep = classify_information_text(elev_doc, &[], Some(&clf), |_, _| {});
+        println!("10. RÖD Elevuppgifter => level={}", elev_rep.level);
+        assert_eq!(elev_rep.level, "red");
+
+        // 11. Lösryckt mittstycke om hybridmöten UTAN kurs-intro på rad 1 — får inte heller bli RÖD!
+        let hybrid_excerpt_no_intro = "\
+Skillnad på utformning beroende på hur många deltagare som medverkar. Stående eller sittande ledare. Ledarens placering. Vid mellanstora hybridmöten (ca 25 st medverkande fysiskt) rekommenderas en talyta i mitten med egen skärm. Större hybridmöten typ 100 medverkande fysiskt liknar mer en TV produktion och där kanske man måste anlita extern kompetens om inte kompetensen finns i organisationen.\n\n\
+Vid vissa avancerade möten är hybridmöten inte att föredra som första alternativ. Kan t.ex gälla förhandlingar. Kanske bättre att köra fysiskt eller helt digitalt.";
+        let excerpt_rep =
+            classify_information_text(hybrid_excerpt_no_intro, &[], Some(&clf), |_, _| {});
+        println!(
+            "11. Hybridmöten utan kurs-intro => level={}, findings={:?}",
+            excerpt_rep.level, excerpt_rep.section_findings
+        );
+        assert_ne!(
+            excerpt_rep.level, "red",
+            "Generell metodtext om hybridmöten utan kurs-intro får inte heller klassas som RÖD"
         );
     }
 }
