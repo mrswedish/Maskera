@@ -1456,11 +1456,12 @@ async fn ensure_judge_loaded(app: AppHandle) -> Result<info_judge::JudgeModelSta
     );
 
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        let engine = info_judge::JudgeEngine::load(&path)?;
         let mut guard = JUDGE_ENGINE
             .lock()
             .map_err(|e| format!("Låsfel för Lager 4: {e}"))?;
-        *guard = Some(engine);
+        if guard.is_none() {
+            *guard = Some(info_judge::JudgeEngine::load(&path)?);
+        }
         Ok(())
     })
     .await

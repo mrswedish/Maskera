@@ -40,18 +40,19 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         with:
           tagName: latest
-          releaseName: "Maskera v0.6.0 — Latest Build (inkl. valbar Lager 4 / Judge)"
+          releaseName: "Maskera v0.6.1 — Latest Build (Snabboptimerad Lager 4 / Judge)"
           releaseBody: |
-            ## Nedladdning (v0.6.0)
+            ## Nedladdning (v0.6.1)
 
             | Fil | Beskrivning |
             |---|---|
             | `Maskera-portabel.exe` | **Portabel** — kör direkt utan installation |
-            | `Maskera_0.6.0_x64-setup.exe` | Installerare — installerar i Start-menyn |
+            | `Maskera_0.6.1_x64-setup.exe` | Installerare — installerar i Start-menyn |
 
-            ### Nytt i v0.6.0
-            - **Valbar Helhetsbedömning — Lager 4 (Judge) i *Klassificera information*:** Aktivt tillval (`Gemma 4 E2B`, ~2,62 GB lokal GGUF) som läser hela dokumentets sammanhang och överprövar lösryckta stycketräffar från Lager 3 (med en-klicks avinstallation för att frigöra diskutrymmet).
-            - Basmodellerna för Lager 2 + Lager 3 (~318 MB) laddas ner automatiskt första gången och cachas lokalt.
+            ### Nytt i v0.6.1 (Prestandaoptimering av Lager 4 / Judge på CPU)
+            - **Eliminerad 262k-GBNF-flaskhals:** Förifylld kompakt JSON (`{"t":"...`) med ren `greedy`-sampling (ingen ny modellnedladdning krävs — återanvänder befintlig `Gemma 4 E2B` GGUF-fil).
+            - **Varm inferenskontext (`n_ctx = 2048`) & cachad systemprompt i RAM:** Systemprompten beräknas en enda gång i KV-cachen vid modellstart; mellan dokument rensas enbart dokumentdelen.
+            - **Kompaktare utdrag + Röd-prioritering + trådoptimering:** Röda avsnitt prioriteras alltid främst, base64-bilddata städas bort och separata trådantal används för inläsning respektive ordgenerering.
 
             ### Tidigare version utan Lager 4 (Judge)
             - **[Maskera v0.5.0 — Lager 1–3 (utan Judge-funktionen)](https://github.com/mrswedish/Maskera/releases/tag/v0.5.0)** finns permanent sparad under Releases.
@@ -60,7 +61,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload portable EXE & publish versioned v0.6.0 release
+      - name: Upload portable EXE & publish versioned v0.6.1 release
         run: |
           Copy-Item "src-tauri/target/release/maskera.exe" "Maskera-portabel.exe"
           gh release upload latest "Maskera-portabel.exe" --clobber
@@ -68,14 +69,14 @@ jobs:
           $setupExe = Get-ChildItem -Path "src-tauri/target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
           $msiFile  = Get-ChildItem -Path "src-tauri/target/release/bundle/msi/*.msi" | Select-Object -First 1
 
-          gh release view v0.6.0 > $null 2>&1
+          gh release view v0.6.1 > $null 2>&1
           if ($LASTEXITCODE -ne 0) {
-            gh release create v0.6.0 "Maskera-portabel.exe" $setupExe.FullName $msiFile.FullName `
-              --title "Maskera v0.6.0 — Lager 1–3 + valbar Helhetsbedömning (Lager 4 / Judge)" `
-              --notes "Version 0.6.0 med valbar lokal helhetsbedömning (**Lager 4 / Judge** med Gemma 4 E2B) i vyn *Klassificera information*. Föregående version utan Judge finns kvar här: [v0.5.0](https://github.com/mrswedish/Maskera/releases/tag/v0.5.0)." `
+            gh release create v0.6.1 "Maskera-portabel.exe" $setupExe.FullName $msiFile.FullName `
+              --title "Maskera v0.6.1 — Snabboptimerad Lager 4 (Judge) på CPU" `
+              --notes "Version 0.6.1 med kraftigt optimerad CPU-inferens för **Lager 4 / Judge** (ingen ny modellnedladdning krävs). Föregående version utan Judge finns kvar här: [v0.5.0](https://github.com/mrswedish/Maskera/releases/tag/v0.5.0)." `
               --latest=false
           } else {
-            gh release upload v0.6.0 "Maskera-portabel.exe" $setupExe.FullName $msiFile.FullName --clobber
+            gh release upload v0.6.1 "Maskera-portabel.exe" $setupExe.FullName $msiFile.FullName --clobber
           }
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

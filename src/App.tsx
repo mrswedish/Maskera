@@ -608,6 +608,20 @@ export default function App() {
           try {
             localStorage.removeItem("maskera-judge-enabled");
           } catch {}
+        } else if (!jst.loaded) {
+          let wantsJudge = false;
+          try {
+            wantsJudge =
+              localStorage.getItem("maskera-judge-enabled") === "true";
+          } catch {}
+          if (wantsJudge) {
+            // Förvärm Lager 4-modellen + den cachade systemprompten i bakgrunden direkt vid appstart
+            invoke<JudgeModelStatus>("ensure_judge_loaded")
+              .then((warmed) => {
+                if (active) setJudgeStatus(warmed);
+              })
+              .catch(() => {});
+          }
         }
       })
       .catch(() => {});

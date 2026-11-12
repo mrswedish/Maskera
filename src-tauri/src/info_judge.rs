@@ -1,14 +1,18 @@
+use std::borrow::Cow;
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Instant;
 
 use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::token::LlamaToken;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::info_classification::{build_handling_guidance, InfoClassificationReport, InfoSignal};
@@ -19,7 +23,16 @@ pub const JUDGE_HF_URL: &str =
 pub const JUDGE_EXPECTED_BYTES: u64 = 2_620_400_000;
 pub const JUDGE_MODEL_LABEL: &str = "Gemma 4 E2B (Q4_K_XL · 2,62 GB)";
 
+const JUDGE_N_CTX: u32 = 2048;
+const JUDGE_N_BATCH: usize = 1024;
+const JUDGE_N_UBATCH: u32 = 512;
+const MAX_DOC_TOKENS: usize = 1350;
+const MAX_GEN_TOKENS: usize = 96;
+/// Förifylld start på JSON-svaret så att modellen direkt skriver dokumenttypens värde utan GBNF-overhead.
+const PREFILL_JSON_PREFIX: &str = "{\"t\":\"";
+
 static LLAMA_BACKEND: OnceLock<Result<LlamaBackend, String>> = OnceLock::new();
+static RE_INLINE_DATA_URI: OnceLock<Regex> = OnceLock::new();
 
 fn ensure_llama_backend() -> Result<&'static LlamaBackend, String> {
     let res = LLAMA_BACKEND.get_or_init(|| {
@@ -32,6 +45,25 @@ fn ensure_llama_backend() -> Result<&'static LlamaBackend, String> {
         Ok(b) => Ok(b),
         Err(e) => Err(e.clone()),
     }
+}
+
+/// Beräknar trådantal separat för minnesbunden ordgenerering (`n_threads`, fysiska kärnor utan hyperthread-trängsel)
+/// respektive beräkningsbunden prompt-inläsning (`n_threads_batch`).
+pub fn optimal_cpu_threads() -> (i32, i32) {
+    let logical = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let gen_threads = if logical <= 4 {
+        logical.max(1)
+    } else {
+        (logical / 2).clamp(4, 6)
+    };
+    let batch_threads = if logical <= 4 {
+        logical.max(1)
+    } else {
+        ((logical * 3) / 4).clamp(4, 8)
+    };
+    (gen_threads as i32, batch_threads as i32)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,31 +90,39 @@ pub struct JudgeAssessment {
     pub level_adjusted: bool,
     /// Sant om skarpa fynd i Lager 1 (t.ex. personnummer, bankkonto, kort eller lösenord) blockerade sänkning från Röd
     pub hard_veto_applied: bool,
-    /// Kortfattad svensk motivering (1–3 meningar) utifrån dokumentets helhet och syfte
+    /// Kortfattad svensk motivering utifrån dokumentets helhet och syfte
     pub rationale: String,
     pub duration_ms: u64,
 }
 
+/// Kompakt intern JSON-struktur (`t`, `l`, `d`, `r`) som halverar antalet genererade strukturtokens,
+/// men även accepterar de fullständiga fältnamnen bakåtkompatibelt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct RawJudgeJson {
+    #[serde(rename = "t", alias = "documentType", alias = "type", default)]
     pub document_type: String,
+    #[serde(rename = "l", alias = "suggestedLevel", alias = "level", default)]
     pub suggested_level: String,
-    #[serde(default)]
+    #[serde(rename = "d", alias = "downgradeRedSections", alias = "downgrade", default)]
     pub downgrade_red_sections: bool,
+    #[serde(rename = "r", alias = "rationale", alias = "reason", default)]
     pub rationale: String,
 }
 
-/// Strikt GBNF-grammatik som tvingar Gemma 4 E2B att direkt generera ett giltigt, kompakt JSON-objekt.
-const JUDGE_JSON_GBNF: &str = r#"root ::= "{" "\"documentType\":" string ",\"suggestedLevel\":" level ",\"downgradeRedSections\":" boolean ",\"rationale\":" string "}"
-level ::= "\"green\"" | "\"yellow\"" | "\"red\""
-boolean ::= "true" | "false"
-string ::= "\"" char+ "\""
-char ::= [^"\\\x00-\x1F] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F])
-"#;
-
 pub struct JudgeEngine {
-    model: LlamaModel,
+    /// Viktigt: `ctx` ligger i `Option` och töms alltid explicit i `Drop` INNAN `model` frigörs.
+    ctx: Option<LlamaContext<'static>>,
+    /// Heap-allokerad modell på stabil minnesadress under hela `JudgeEngine`s livstid.
+    model: Box<LlamaModel>,
+    /// Förinläst systemprompt i KV-cachen `[0 .. cached_prefix_len)` så att den aldrig räknas om mellan dokument.
+    system_tokens: Vec<LlamaToken>,
+    cached_prefix_len: usize,
+}
+
+impl Drop for JudgeEngine {
+    fn drop(&mut self) {
+        self.ctx = None;
+    }
 }
 
 impl JudgeEngine {
@@ -103,10 +143,45 @@ impl JudgeEngine {
             model_params = model_params.with_n_gpu_layers(999);
         }
 
-        let model = LlamaModel::load_from_file(backend, model_path, &model_params)
-            .map_err(|e| format!("Kunde inte ladda Lager 4-modellen (Gemma 4 E2B): {e}"))?;
+        let model = Box::new(
+            LlamaModel::load_from_file(backend, model_path, &model_params)
+                .map_err(|e| format!("Kunde inte ladda Lager 4-modellen (Gemma 4 E2B): {e}"))?,
+        );
 
-        Ok(Self { model })
+        let (gen_threads, batch_threads) = optimal_cpu_threads();
+        let ctx_params = LlamaContextParams::default()
+            .with_n_ctx(NonZeroU32::new(JUDGE_N_CTX))
+            .with_n_batch(JUDGE_N_BATCH as u32)
+            .with_n_ubatch(JUDGE_N_UBATCH)
+            .with_swa_full(true)
+            .with_no_perf(true)
+            .with_n_threads(gen_threads)
+            .with_n_threads_batch(batch_threads);
+
+        // SAFETY: `model` ägs i en `Box<LlamaModel>` på stabil heap-adress inne i `JudgeEngine`,
+        // exponeras aldrig utåt som muterbar referens och `self.ctx` töms alltid explicit före `model` i `Drop`.
+        let model_static_ref: &'static LlamaModel = unsafe { &*(&*model as *const LlamaModel) };
+        let mut ctx = model_static_ref
+            .new_context(backend, ctx_params)
+            .map_err(|e| format!("Kunde inte skapa inferenskontext för Lager 4: {e}"))?;
+
+        let system_prefix = build_judge_system_prefix();
+        let system_tokens = model
+            .vocab()
+            .tokenize(system_prefix.as_bytes(), false, true);
+
+        let mut cached_prefix_len = 0usize;
+        if !system_tokens.is_empty() {
+            decode_token_slice(&mut ctx, &system_tokens, 0, false)?;
+            cached_prefix_len = system_tokens.len();
+        }
+
+        Ok(Self {
+            ctx: Some(ctx),
+            model,
+            system_tokens,
+            cached_prefix_len,
+        })
     }
 
     pub fn assess_document(
@@ -115,71 +190,53 @@ impl JudgeEngine {
         report: &InfoClassificationReport,
     ) -> Result<(RawJudgeJson, u64), String> {
         let t0 = Instant::now();
-        let backend = ensure_llama_backend()?;
-
-        let prompt = build_judge_prompt(text, report);
         let vocab = self.model.vocab();
-        // `add_special = false` eftersom `<bos>` ingår explicit i Gemma 4-mallen,
-        // `parse_special = true` så att `<bos>`, `<|turn>`, `<turn|>`, `<|channel>`, `<channel|>` tolkas som kontrolltokens.
-        let mut prompt_tokens = vocab.tokenize(prompt.as_bytes(), false, true);
-        if prompt_tokens.is_empty() {
+
+        let user_turn = build_judge_user_turn(text, report);
+        // `add_special = false` eftersom `<bos>` redan ligger i den cachade systemprompten,
+        // `parse_special = true` så att `<|turn>`, `<turn|>`, `<|channel>`, `<channel|>` tolkas som kontrolltokens.
+        let mut doc_tokens = vocab.tokenize(user_turn.as_bytes(), false, true);
+        if doc_tokens.is_empty() {
             return Err("Kunde inte tokenisera underlaget för Lager 4.".to_string());
         }
-
-        // Håll kontextfönstret kompakt (max ~3 500 prompttokens + ~256 svarsmarginal = 4 096) för låg RAM-förbrukning och snabb CPU-körning.
-        const MAX_PROMPT_TOKENS: usize = 3500;
-        if prompt_tokens.len() > MAX_PROMPT_TOKENS {
-            prompt_tokens.truncate(MAX_PROMPT_TOKENS);
+        if doc_tokens.len() > MAX_DOC_TOKENS {
+            doc_tokens.truncate(MAX_DOC_TOKENS);
         }
 
-        let n_ctx: u32 = 4096;
-        let n_batch: usize = 1024;
-        let threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-            .clamp(1, 8) as i32;
+        let ctx = self
+            .ctx
+            .as_mut()
+            .ok_or_else(|| "Inferenskontexten för Lager 4 är inte initierad.".to_string())?;
 
-        let ctx_params = LlamaContextParams::default()
-            .with_n_ctx(NonZeroU32::new(n_ctx))
-            .with_n_batch(n_batch as u32)
-            .with_n_ubatch(512)
-            .with_n_threads(threads)
-            .with_n_threads_batch(threads);
+        // Rensa enbart dokumentdelen `[cached_prefix_len ..)` ur KV-cachen så att systemprompten återanvänds på 0 ms!
+        let prefix_reused = self.cached_prefix_len > 0
+            && matches!(
+                ctx.clear_kv_cache_seq(Some(0), Some(self.cached_prefix_len as u32), None),
+                Ok(true)
+            );
 
-        let mut ctx = self
-            .model
-            .new_context(backend, ctx_params)
-            .map_err(|e| format!("Kunde inte skapa inferenskontext för Lager 4: {e}"))?;
-
-        let mut batch = LlamaBatch::new(n_batch, 1);
-        let total_prompt = prompt_tokens.len();
-
-        for chunk_start in (0..total_prompt).step_by(n_batch) {
-            let chunk_end = (chunk_start + n_batch).min(total_prompt);
-            batch.clear();
-            for (offset, &tok) in prompt_tokens[chunk_start..chunk_end].iter().enumerate() {
-                let pos = chunk_start + offset;
-                let is_last = pos + 1 == total_prompt;
-                batch
-                    .add(tok, pos as i32, &[0], is_last)
-                    .map_err(|e| format!("Batch-fel vid inläsning av prompt i Lager 4: {e}"))?;
+        if !prefix_reused {
+            ctx.clear_kv_cache();
+            if !self.system_tokens.is_empty() {
+                decode_token_slice(ctx, &self.system_tokens, 0, false)?;
+                self.cached_prefix_len = self.system_tokens.len();
+            } else {
+                self.cached_prefix_len = 0;
             }
-            ctx.decode(&mut batch)
-                .map_err(|e| format!("Kunde inte tolka dokumentunderlaget i Lager 4: {e}"))?;
         }
 
-        let mut sampler = match LlamaSampler::grammar(&self.model, JUDGE_JSON_GBNF, "root") {
-            Ok(grammar) => LlamaSampler::chain_simple([grammar, LlamaSampler::greedy()]),
-            Err(_) => LlamaSampler::greedy(),
-        };
+        let last_batch_tokens =
+            decode_token_slice(ctx, &doc_tokens, self.cached_prefix_len, true)?;
 
-        let mut gen_tokens = Vec::with_capacity(180);
-        let mut cur_pos = total_prompt as i32;
-        const MAX_GEN_TOKENS: usize = 180;
+        // Ren `greedy()` utan GBNF eliminerar 262 144-vokabulärens strängallokeringar vid varje genererat ord.
+        let mut sampler = LlamaSampler::greedy();
+        let mut batch = LlamaBatch::new(1, 1);
+        let mut gen_tokens = Vec::with_capacity(MAX_GEN_TOKENS);
+        let mut cur_pos = (self.cached_prefix_len + doc_tokens.len()) as i32;
+        let mut logits_idx = (last_batch_tokens as i32) - 1;
 
         for _ in 0..MAX_GEN_TOKENS {
-            // Obs: `sampler.sample` anropar redan `llama_sampler_accept` internt i llama.cpp.
-            let next_token = sampler.sample(&ctx, batch.n_tokens() - 1);
+            let next_token = sampler.sample(ctx, logits_idx);
             if vocab.is_eog(next_token) {
                 break;
             }
@@ -187,9 +244,9 @@ impl JudgeEngine {
 
             let bytes = vocab.detokenize(&gen_tokens, true, false);
             let partial = String::from_utf8_lossy(&bytes);
-            let trimmed = partial.trim();
-            if trimmed.ends_with('}') {
-                if let Ok(parsed) = parse_raw_judge_json(trimmed) {
+            let combined = format!("{}{}", PREFILL_JSON_PREFIX, partial.trim_end());
+            if combined.ends_with('}') {
+                if let Ok(parsed) = parse_raw_judge_json(&combined) {
                     let elapsed = t0.elapsed().as_millis() as u64;
                     return Ok((parsed, elapsed));
                 }
@@ -202,14 +259,47 @@ impl JudgeEngine {
             cur_pos += 1;
             ctx.decode(&mut batch)
                 .map_err(|e| format!("Inferensfel under generering i Lager 4: {e}"))?;
+            logits_idx = 0;
         }
 
         let bytes = vocab.detokenize(&gen_tokens, true, false);
-        let raw_output = String::from_utf8_lossy(&bytes);
-        let parsed = parse_raw_judge_json(&raw_output)?;
+        let partial = String::from_utf8_lossy(&bytes);
+        let full_raw = format!("{}{}", PREFILL_JSON_PREFIX, partial.trim());
+        let parsed = parse_raw_judge_json(&full_raw)?;
         let elapsed = t0.elapsed().as_millis() as u64;
         Ok((parsed, elapsed))
     }
+}
+
+/// Läser in en sekvens av tokens i kontextens KV-cache i bitar om `JUDGE_N_BATCH`.
+/// Returnerar antalet tokens i den sista batchen (för logit-indexering när `compute_last_logit = true`).
+fn decode_token_slice(
+    ctx: &mut LlamaContext<'_>,
+    tokens: &[LlamaToken],
+    start_pos: usize,
+    compute_last_logit: bool,
+) -> Result<usize, String> {
+    let mut batch = LlamaBatch::new(JUDGE_N_BATCH, 1);
+    let total = tokens.len();
+    let mut last_chunk_len = 0usize;
+
+    for chunk_start in (0..total).step_by(JUDGE_N_BATCH) {
+        let chunk_end = (chunk_start + JUDGE_N_BATCH).min(total);
+        last_chunk_len = chunk_end - chunk_start;
+        batch.clear();
+        for (offset, &tok) in tokens[chunk_start..chunk_end].iter().enumerate() {
+            let rel = chunk_start + offset;
+            let pos = (start_pos + rel) as i32;
+            let want_logit = compute_last_logit && (rel + 1 == total);
+            batch
+                .add(tok, pos, &[0], want_logit)
+                .map_err(|e| format!("Batch-fel vid inläsning i Lager 4: {e}"))?;
+        }
+        ctx.decode(&mut batch)
+            .map_err(|e| format!("Kunde inte tolka underlaget i Lager 4: {e}"))?;
+    }
+
+    Ok(last_chunk_len)
 }
 
 /// Säker teckenbaserad trunkering som aldrig klipper mitt i ett svenskt UTF-8-tecken (å/ä/ö/emoji).
@@ -223,12 +313,25 @@ pub fn truncate_chars(input: &str, max_chars: usize) -> String {
     }
 }
 
+/// Städar bort eventuella långa inbäddade base64-bilder (`data:image/...;base64,...`) ur Judge-utdraget
+/// så att rå bildkod aldrig slösar kontexttokens om användaren klistrat in Markdown/HTML.
+pub fn strip_inline_data_uris(input: &str) -> Cow<'_, str> {
+    if !input.contains(";base64,") {
+        return Cow::Borrowed(input);
+    }
+    let re = RE_INLINE_DATA_URI.get_or_init(|| {
+        Regex::new(r"data:[a-zA-Z0-9/+.-]+;base64,[A-Za-z0-9+/=\s]{64,}")
+            .expect("valid data URI regex")
+    });
+    re.replace_all(input, "[bild]")
+}
+
 /// Extraherar korta rubrikrader ur dokumentet så att Lager 4 ser hela dokumentets disposition.
 fn extract_document_headings(text: &str, max_headings: usize) -> Vec<String> {
     let mut out = Vec::new();
     for line in text.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() {
+        if trimmed.is_empty() || trimmed.contains(";base64,") {
             continue;
         }
         let char_len = trimmed.chars().count();
@@ -259,22 +362,41 @@ fn extract_document_headings(text: &str, max_headings: usize) -> Vec<String> {
     out
 }
 
-/// Bygger kaskadprompten (Gemma 4 non-thinking format med förifylld tom `<|channel>thought\n<channel|>`).
-pub fn build_judge_prompt(text: &str, report: &InfoClassificationReport) -> String {
-    let total_chars = text.chars().count();
-    let opening = truncate_chars(text.trim(), 750);
-    let closing = if total_chars > 1100 {
-        let tail_chars: Vec<char> = text.trim().chars().collect();
-        let start_idx = tail_chars.len().saturating_sub(420);
+/// Invariant systemprefix som förberäknas i KV-cachen vid modellstart (slutar vid kontrolltoken `<turn|>`
+/// så att BPE-tokeniseringen mot efterföljande användartur alltid är exakt på tokengränsen).
+pub fn build_judge_system_prefix() -> String {
+    let system_prompt = "\
+Du är Lager 4 (Judge) för svensk informationsklassning (green, yellow, red) i offentlig verksamhet.\n\
+Lager 3 granskar bara lösryckta stycken och kan feltolka kursreferat, utbildning, metoder eller allmänna rutiner/utkast som RED pga enstaka ord (t.ex. sekretess, samtal, upphandling, patientdatalagen).\n\
+Bedöm HELA DOKUMENTETS SYFTE:\n\
+- \"green\": Offentlig information för öppen spridning (broschyr, pressmeddelande, öppen info utan interna noteringar/personkoppling).\n\
+- \"yellow\": Intern arbetsinformation (utkast, intern rutin/lathund, kurs-/seminariereferat, APT-/mötesanteckning, schema, interna arbetskontakter/intranät).\n\
+- \"red\": Verkligt känsligt individärende (enskild patients/elevs vård/hälsa/utredning, enskild medarbetares rehab/sjukfrånvaro/disciplin/lön), skarp anbuds-/besluts-/säkerhetssekretess eller personnummer/konto/lösenord.\n\
+ Om Lager 3 gav RED på generell rutin/utbildning/referat utan verkligt individärende: sätt \"l\":\"yellow\" (eller \"green\" om helt publikt) och \"d\":true.\n\
+Svara ENDAST på en rad JSON utan citattecken inne i textvärden: {\"t\":\"<dokumenttyp 2-4 ord på svenska>\",\"l\":\"green|yellow|red\",\"d\":true|false,\"r\":\"<1 kort mening på svenska, max 22 ord>\"}";
+
+    format!("<bos><|turn>system\n{system_prompt}<turn|>")
+}
+
+/// Bygger den kompakta dokumentturen som läggs direkt efter det cachade systemprefixet.
+/// Prioriterar alltid eventuella RÖDA avsnitt från Lager 3 främst så att Judge alltid ser vad som triggade Röd.
+pub fn build_judge_user_turn(text: &str, report: &InfoClassificationReport) -> String {
+    let cleaned = strip_inline_data_uris(text);
+    let trimmed_doc = cleaned.trim();
+    let total_chars = trimmed_doc.chars().count();
+    let opening = truncate_chars(trimmed_doc, 460);
+    let closing = if total_chars > 750 {
+        let tail_chars: Vec<char> = trimmed_doc.chars().collect();
+        let start_idx = tail_chars.len().saturating_sub(220);
         let tail: String = tail_chars[start_idx..].iter().collect();
         format!("…{}", tail.trim_start())
     } else {
         String::new()
     };
 
-    let headings = extract_document_headings(text, 10);
+    let headings = extract_document_headings(trimmed_doc, 8);
     let headings_line = if headings.is_empty() {
-        "(inga tydliga mellanrubriker)".to_string()
+        "(inga tydliga rubriker)".to_string()
     } else {
         headings.join(" | ")
     };
@@ -283,58 +405,57 @@ pub fn build_judge_prompt(text: &str, report: &InfoClassificationReport) -> Stri
         .signals
         .iter()
         .filter(|s| s.source == "struktur")
-        .map(|s| format!("- [{}] {}", s.level.to_uppercase(), s.title))
+        .map(|s| format!("[{}] {}", s.level.to_uppercase(), s.title))
         .collect();
     let structural_summary = if structural_signals.is_empty() {
-        "- Inga personnummer, bankkonton, kortnummer, hemliga nycklar, intranätlänkar eller personkontaktuppgifter hittades av Lager 1–2.".to_string()
+        "Inga (inga pnr/konton/nycklar/personkontakter)".to_string()
     } else {
-        structural_signals.join("\n")
+        structural_signals.join("; ")
     };
 
+    // Sortera så att RÖDA stycken alltid visas före GULA och högst konfidens kommer först (max 4 utdrag).
+    let mut prioritized_findings: Vec<_> = report.section_findings.iter().collect();
+    prioritized_findings.sort_by(|a, b| {
+        let rank_a = if a.level == "red" { 0u8 } else { 1u8 };
+        let rank_b = if b.level == "red" { 0u8 } else { 1u8 };
+        rank_a.cmp(&rank_b).then_with(|| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    });
+
     let mut flagged_lines = Vec::new();
-    for f in report.section_findings.iter().take(6) {
-        let snippet = if f.end <= text.len()
+    for f in prioritized_findings.into_iter().take(4) {
+        let raw_snippet = if f.end <= text.len()
             && f.start <= f.end
             && text.is_char_boundary(f.start)
             && text.is_char_boundary(f.end)
         {
-            truncate_chars(text[f.start..f.end].trim(), 240)
+            strip_inline_data_uris(text[f.start..f.end].trim()).into_owned()
         } else {
-            truncate_chars(&f.preview, 200)
+            strip_inline_data_uris(&f.preview).into_owned()
         };
+        let snippet = truncate_chars(&raw_snippet, 180);
         flagged_lines.push(format!(
-            "- Avsnitt {} [Lager 3: {} | {}]: \"{}\"",
-            f.paragraph_index,
-            f.level.to_uppercase(),
-            f.category,
-            snippet.replace('\n', " ")
+            "- #{p} [{lvl} | {cat}]: {snip}",
+            p = f.paragraph_index,
+            lvl = f.level.to_uppercase(),
+            cat = truncate_chars(&f.category, 42),
+            snip = snippet.replace('\n', " ")
         ));
     }
     let flagged_summary = if flagged_lines.is_empty() {
-        "- Inga enskilda sakavsnitt flaggades av Lager 3.".to_string()
+        "- Inga flaggade avsnitt.".to_string()
     } else {
         flagged_lines.join("\n")
     };
 
-    let system_prompt = "\
-Du är Lager 4 (Judge) i Maskera — ett lokalt svenskt beslutsstöd för informationsklassificering enligt trafikljusmodellen (green, yellow, red) i offentlig verksamhet.\n\
-Lager 3 bedömer enskilda textstycken med vektorlikhet och kan därför feltolka lösryckta ord (t.ex. klassa ett kursreferat, utbildningsmaterial eller en metodguide som RED bara för att ord som samtal, ledare, extern kompetens, upphandling eller säkerhet nämns generellt).\n\
-Din uppgift är att bedöma DOKUMENTETS HELHET OCH SYFTE:\n\
-- \"green\": Offentlig information avsedd för öppen spridning (t.ex. publicerad broschyr, tidtabell, pressmeddelande, öppen inbjudan eller allmän metodtext utan interna anteckningar/personkopplingar).\n\
-- \"yellow\": Intern arbetsinformation inom verksamheten/arbetsgruppen (t.ex. kurs- eller seminariereferat från kollega, APT-/mötesanteckningar, utkast, interna rutiner/lathundar, schema/bemanning, vanligt medarbetarsamtal om mål/trivsel eller dokument med interna arbetskontakter/intranätlänkar).\n\
-- \"red\": Särskilt skyddsvärd eller sekretessbelagd information om verkliga fall/hemligheter (t.ex. enskild patients/elevs hälsa eller utredning, faktiskt personal-/rehab-/disciplinärende eller individuell lön, pågående anbudssekretess före tilldelning, ej offentliggjort politiskt beslutsunderlag, krisberedskap, lås/larmkoder/lösenord, personnummer eller privat bankkonto).\n\
-Regler:\n\
-1. Om Lager 3 flaggade RED men helheten visar att texten är ett kursreferat, seminarium, utbildningsmaterial, metodtips eller allmänt internt arbetsutkast utan verkligt individärende eller skarp sekretess: sätt suggestedLevel till \"yellow\" (eller \"green\" om helt publikt) och downgradeRedSections till true.\n\
-2. Om dokumentet trots mjuk ton faktiskt beskriver en enskild individs sjukdom/rehab/misskötsamhet/lön eller skarp verksamhetssekretess: sätt suggestedLevel till \"red\" och downgradeRedSections till false.\n\
-3. Skriv documentType kort på svenska (2–5 ord, t.ex. \"Internt seminariereferat\", \"Offentlig informationsbroschyr\", \"Känsligt personal-/rehabärende\") och rationale på klar svenska i 1–2 korta meningar.";
-
     let mut user_prompt = format!(
-        "GRANSKA DOKUMENTETS HELHET:\n\
-Längd: {} tecken ({} granskade stycken)\n\
-Lager 1–3 preliminär nivå: {}\n\n\
-STRUKTURELLA FYND (Lager 1–2):\n{}\n\n\
-RUBRIKER / DISPOSITION:\n{}\n\n\
-DOKUMENTETS INLEDNING:\n{}\n",
+        "Längd: {} tecken ({} stycken) | Lager 1–3: {}\n\
+Lager 1–2: {}\n\
+Rubriker: {}\n\
+Inledning: {}\n",
         total_chars,
         report.paragraphs_scanned,
         report.level.to_uppercase(),
@@ -344,32 +465,46 @@ DOKUMENTETS INLEDNING:\n{}\n",
     );
 
     if !closing.is_empty() {
-        user_prompt.push_str(&format!("\nDOKUMENTETS AVSLUTNING:\n{}\n", closing));
+        user_prompt.push_str(&format!("Slut: {}\n", closing));
     }
 
-    user_prompt.push_str(&format!(
-        "\nAVSNITT SOM LAGER 3 FLAGGADE:\n{}\n\n\
-Svara ENDAST med JSON enligt schemat.",
-        flagged_summary
-    ));
+    user_prompt.push_str(&format!("Flaggade avsnitt:\n{}", flagged_summary));
 
     format!(
-        "<bos><|turn>system\n{system_prompt}<turn|>\n<|turn>user\n{user_prompt}<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+        "\n<|turn>user\n{user_prompt}<turn|>\n<|turn>model\n<|channel>thought\n<channel|>{PREFILL_JSON_PREFIX}"
     )
 }
 
-/// Tolkar JSON-svaret robust även om modellen skulle ha lagt till blanksteg eller om grammatik-fallback användes.
+/// Bygger hela kaskadprompten (systemprefix + dokumenttur) för inspektion och enhetstester.
+#[cfg(test)]
+pub fn build_judge_prompt(text: &str, report: &InfoClassificationReport) -> String {
+    format!(
+        "{}{}",
+        build_judge_system_prefix(),
+        build_judge_user_turn(text, report)
+    )
+}
+
+/// Tolkar JSON-svaret robust — stöder både kompakta nycklar (`t`,`l`,`d`,`r`), långa nycklar
+/// och fallback-utvinning om modellen råkat skriva oescapade citattecken inne i den svenska motiveringen.
 pub fn parse_raw_judge_json(raw: &str) -> Result<RawJudgeJson, String> {
     let trimmed = raw.trim();
     if let Ok(parsed) = serde_json::from_str::<RawJudgeJson>(trimmed) {
-        return Ok(sanitize_raw_judge(parsed));
+        if !parsed.suggested_level.is_empty() {
+            return Ok(sanitize_raw_judge(parsed));
+        }
     }
 
     if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
         if start < end {
             let slice = &trimmed[start..=end];
             if let Ok(parsed) = serde_json::from_str::<RawJudgeJson>(slice) {
-                return Ok(sanitize_raw_judge(parsed));
+                if !parsed.suggested_level.is_empty() {
+                    return Ok(sanitize_raw_judge(parsed));
+                }
+            }
+            if let Some(fallback) = salvage_loose_judge_json(slice) {
+                return Ok(sanitize_raw_judge(fallback));
             }
         }
     }
@@ -378,6 +513,65 @@ pub fn parse_raw_judge_json(raw: &str) -> Result<RawJudgeJson, String> {
         "Kunde inte tolka JSON-svaret från Lager 4: {}",
         truncate_chars(trimmed, 180)
     ))
+}
+
+/// Räddar ett JSON-svar om den svenska fritexten i `r`/`rationale` råkat innehålla oescapade `"`-tecken.
+fn salvage_loose_judge_json(slice: &str) -> Option<RawJudgeJson> {
+    let lower = slice.to_ascii_lowercase();
+    let suggested_level = if lower.contains("\"l\":\"green\"")
+        || lower.contains("\"l\": \"green\"")
+        || lower.contains("\"suggestedlevel\":\"green\"")
+    {
+        "green"
+    } else if lower.contains("\"l\":\"red\"")
+        || lower.contains("\"l\": \"red\"")
+        || lower.contains("\"suggestedlevel\":\"red\"")
+    {
+        "red"
+    } else if lower.contains("\"l\":\"yellow\"")
+        || lower.contains("\"l\": \"yellow\"")
+        || lower.contains("\"suggestedlevel\":\"yellow\"")
+    {
+        "yellow"
+    } else {
+        return None;
+    };
+
+    let downgrade_red_sections =
+        lower.contains("\"d\":true") || lower.contains("\"d\": true") || lower.contains("\"downgraderedsections\":true");
+
+    let document_type = extract_between_markers(slice, "\"t\":\"", "\",\"")
+        .or_else(|| extract_between_markers(slice, "\"documentType\":\"", "\",\""))
+        .unwrap_or_else(|| "Granskat dokument".to_string())
+        .replace('"', "'");
+
+    let rationale = extract_rationale_tail(slice, "\"r\":\"")
+        .or_else(|| extract_rationale_tail(slice, "\"rationale\":\""))
+        .unwrap_or_default()
+        .replace('"', "'");
+
+    Some(RawJudgeJson {
+        document_type,
+        suggested_level: suggested_level.to_string(),
+        downgrade_red_sections,
+        rationale,
+    })
+}
+
+fn extract_between_markers(s: &str, start_pat: &str, end_pat: &str) -> Option<String> {
+    let start = s.find(start_pat)? + start_pat.len();
+    let rest = &s[start..];
+    let end = rest.find(end_pat)?;
+    Some(rest[..end].trim().to_string())
+}
+
+fn extract_rationale_tail(s: &str, key_pat: &str) -> Option<String> {
+    let start = s.find(key_pat)? + key_pat.len();
+    let rest = s[start..].trim_end();
+    let stripped = rest
+        .strip_suffix("\"}")
+        .or_else(|| rest.strip_suffix('}'))?;
+    Some(stripped.trim_end_matches('"').trim().to_string())
 }
 
 fn sanitize_raw_judge(mut parsed: RawJudgeJson) -> RawJudgeJson {
@@ -698,5 +892,60 @@ mod tests {
         let t = truncate_chars(s, 22);
         assert!(t.ends_with('…'));
         assert!(t.starts_with("Årsredovisning för Öst"));
+    }
+
+    #[test]
+    fn parses_compact_prefilled_json_and_unescaped_quotes_in_rationale() {
+        let model_tail = r#"Intern samordningsrutin","l":"yellow","d":true,"r":"Utkast till rutin som nämner "sekretess" generellt utan enskilda patientuppgifter."}"#;
+        let combined = format!("{}{}", PREFILL_JSON_PREFIX, model_tail);
+        let parsed = parse_raw_judge_json(&combined).expect("salvages unescaped Swedish quotes");
+        assert_eq!(parsed.document_type, "Intern samordningsrutin");
+        assert_eq!(parsed.suggested_level, "yellow");
+        assert!(parsed.downgrade_red_sections);
+        assert!(parsed.rationale.contains("'sekretess'"));
+    }
+
+    #[test]
+    fn strips_inline_base64_images_and_prioritizes_red_sections_first() {
+        let mut report = sample_red_layer3_report(false);
+        report.section_findings.clear();
+        for idx in 1..=5 {
+            report.section_findings.push(InfoSectionFinding {
+                paragraph_index: idx,
+                preview: format!("Gult arbetsavsnitt nummer {idx}"),
+                start: 0,
+                end: 0,
+                category: "APT- & Mötesanteckningar".to_string(),
+                level: "yellow".to_string(),
+                confidence: 0.80,
+                reason: "Intern notering.".to_string(),
+            });
+        }
+        report.section_findings.push(InfoSectionFinding {
+            paragraph_index: 9,
+            preview: "Om sekretessbelagd information lämnas dokumenteras den enligt patientdatalagen.".to_string(),
+            start: 0,
+            end: 0,
+            category: "Vård, Hälsa & Elevhälsa".to_string(),
+            level: "red".to_string(),
+            confidence: 0.71,
+            reason: "Lager 3 reagerade på patientdatalagen.".to_string(),
+        });
+
+        let fake_b64 = "A".repeat(200);
+        let doc = format!(
+            "Rutin Digital mötesform\n\n![](data:image/png;base64,{fake_b64})\n\nGemensam rutin."
+        );
+        let turn = build_judge_user_turn(&doc, &report);
+        let full = build_judge_prompt(&doc, &report);
+
+        assert!(full.starts_with("<bos><|turn>system\n"));
+        assert!(!turn.contains(&fake_b64), "base64-bilddata ska rensas bort ur Judge-prompten");
+        assert!(turn.contains("[bild]"));
+        assert!(
+            turn.contains("#9 [RED"),
+            "det röda avsnittet (#9) måste alltid prioriteras före gula avsnitt"
+        );
+        assert!(turn.ends_with(PREFILL_JSON_PREFIX));
     }
 }
