@@ -79,3 +79,45 @@ export interface SetupProgress {
   downloadedBytes: number;
   totalBytes: number;
 }
+
+export type InfoLevel = "green" | "yellow" | "red";
+
+export interface InfoSignal {
+  level: InfoLevel;
+  source: "struktur" | "kontext" | string;
+  title: string;
+  detail: string;
+}
+
+export interface HandlingGuidance {
+  heading: string;
+  summary: string;
+  storageGuidance: string;
+  sharingGuidance: string;
+  examplesNote: string;
+  disclaimer: string;
+}
+
+export interface InfoSectionFinding {
+  paragraphIndex: number;
+  preview: string;
+  start: number;
+  end: number;
+  category: string;
+  level: "yellow" | "red";
+  confidence: number;
+  reason: string;
+}
+
+export interface InfoClassificationReport {
+  level: InfoLevel;
+  badgeTitle: string;
+  contentHeadline: string;
+  contentExplanation: string;
+  signals: InfoSignal[];
+  handling: HandlingGuidance;
+  sectionFindings: InfoSectionFinding[];
+  paragraphsScanned: number;
+  scanDurationMs: number;
+  semanticAvailable: boolean;
+}

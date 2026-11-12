@@ -22,6 +22,8 @@ import {
   Monitor,
   Pencil,
   FolderOpen,
+  FileSearch,
+  Trash2,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -36,6 +38,8 @@ import type {
   ReplacementPair,
   ModelsStatus,
   SetupProgress,
+  InfoClassificationReport,
+  InfoSectionFinding,
 } from "./types";
 import {
   buildTranslationTable,
@@ -219,6 +223,27 @@ function fixFindingOffsets(
   }));
 }
 
+function fixInfoSectionOffsets(
+  text: string,
+  rawFindings: InfoSectionFinding[]
+): InfoSectionFinding[] {
+  if (rawFindings.length === 0) return rawFindings;
+
+  const needed = new Set<number>();
+  for (const f of rawFindings) {
+    needed.add(f.start);
+    needed.add(f.end);
+  }
+
+  const byteToChar = buildByteToCharMap(text, needed);
+
+  return rawFindings.map((f) => ({
+    ...f,
+    start: Math.min(text.length, byteToChar.get(f.start) ?? f.start),
+    end: Math.min(text.length, byteToChar.get(f.end) ?? f.end),
+  }));
+}
+
 function normalizeInputText(raw: string): string {
   return fixMojibake(raw)
     .replace(/\r\n/g, "\n")
@@ -230,7 +255,18 @@ function normalizeInputText(raw: string): string {
 }
 
 export default function App() {
-  // Flikar
+  // Huvudläge (Alternativ B: två separata system — Avidentifiera för AI vs Klassificera information)
+  const [appMode, setAppMode] = useState<"mask" | "classify">("mask");
+  const [infoClassifying, setInfoClassifying] = useState(false);
+  const [infoReport, setInfoReport] = useState<InfoClassificationReport | null>(
+    null
+  );
+  const [isEditingClassify, setIsEditingClassify] = useState(true);
+  const [infoEditedSinceScan, setInfoEditedSinceScan] = useState(false);
+  const [showInfoSectionHighlights, setShowInfoSectionHighlights] =
+    useState(true);
+
+  // Flikar (i AI-avidentifieringsläget)
   const [activeTab, setActiveTab] = useState<"mask" | "table" | "unmask">("mask");
 
   // Källtext & dokumentimport (Word .docx/.odt, Excel .xlsx/.xls/.ods, PDF .pdf, Text)
@@ -723,8 +759,14 @@ export default function App() {
       if (hasAnalyzed) {
         setTextEditedSinceScan(true);
       }
+      if (!nextText.trim()) {
+        setInfoReport(null);
+        setInfoEditedSinceScan(false);
+      } else if (infoReport !== null) {
+        setInfoEditedSinceScan(true);
+      }
     },
-    [sourceText, matches, ignoredKeys, hasAnalyzed]
+    [sourceText, matches, ignoredKeys, hasAnalyzed, infoReport]
   );
 
   // Klarmarkera / godkänn ett granskat avsnitt från EmbeddingGemma 2
@@ -740,6 +782,28 @@ export default function App() {
     });
   }, []);
 
+  // Rensa aktuellt dokument
+  const handleClearDocument = useCallback(() => {
+    setSourceText("");
+    setFileName("");
+    setDocSummary("");
+    setOriginalDocxBytes(null);
+    setOriginalXlsxBytes(null);
+    setIsEditing(true);
+    setIsEditingClassify(true);
+    setInfoEditedSinceScan(false);
+    setEditingSlice(null);
+    setHasAnalyzed(false);
+    setTextEditedSinceScan(false);
+    setReport(null);
+    setInfoReport(null);
+    setRawSemanticFindings([]);
+    setDismissedFindings(new Set());
+    setMatches([]);
+    setIgnoredKeys(new Set());
+    setLastDurationMs(null);
+  }, []);
+
   // Klistra in från urklipp
   const handlePasteClipboard = async () => {
     try {
@@ -751,10 +815,13 @@ export default function App() {
       setOriginalDocxBytes(null);
       setOriginalXlsxBytes(null);
       setIsEditing(true);
+      setIsEditingClassify(true);
+      setInfoEditedSinceScan(false);
       setEditingSlice(null);
       setHasAnalyzed(false);
       setTextEditedSinceScan(false);
       setReport(null);
+      setInfoReport(null);
       setRawSemanticFindings([]);
       setDismissedFindings(new Set());
       setMatches([]);
@@ -781,10 +848,13 @@ export default function App() {
       setOriginalDocxBytes(imported.can_export_docx ? byteArr : null);
       setOriginalXlsxBytes(imported.can_export_xlsx ? byteArr : null);
       setIsEditing(true);
+      setIsEditingClassify(true);
+      setInfoEditedSinceScan(false);
       setEditingSlice(null);
       setHasAnalyzed(false);
       setTextEditedSinceScan(false);
       setReport(null);
+      setInfoReport(null);
       setRawSemanticFindings([]);
       setDismissedFindings(new Set());
       setMatches([]);
@@ -796,6 +866,29 @@ export default function App() {
       setImportingDoc(false);
     }
   }, []);
+
+  // Klassificera dokument enligt signalsystemet (Grön / Gul / Röd) utan att maskera texten
+  const handleClassifyInformation = async () => {
+    if (!sourceText.trim() || infoClassifying) return;
+    setInfoClassifying(true);
+    setNerProgress(null);
+    setGemmaScanProgress(null);
+    try {
+      const res = await invoke<InfoClassificationReport>(
+        "classify_information_document",
+        { text: sourceText }
+      );
+      setInfoReport(res);
+      setInfoEditedSinceScan(false);
+      setIsEditingClassify(false);
+    } catch (err) {
+      alert("Fel vid informationsklassning: " + String(err));
+    } finally {
+      setInfoClassifying(false);
+      setNerProgress(null);
+      setGemmaScanProgress(null);
+    }
+  };
 
   // Analysera text (Steg 1: Regex + BERT NER, Steg 2: EmbeddingGemma 2)
   const handleAnalyze = async () => {
@@ -1698,6 +1791,227 @@ export default function App() {
     toggleDismissFinding,
   ]);
 
+  // ── Läsvy för Informationsklassning (helt omaskerad originaltext + pedagogiska avsnittsmarkeringar) ──
+  const charInfoFindings = useMemo(
+    () =>
+      infoReport
+        ? fixInfoSectionOffsets(sourceText, infoReport.sectionFindings)
+            .filter((f) => f.end > f.start)
+            .sort((a, b) => a.start - b.start)
+        : [],
+    [infoReport, sourceText]
+  );
+
+  const renderPlainDocLine = useCallback(
+    (lineStart: number, lineEnd: number, keyPrefix: string) => {
+      const rawLine = sourceText.slice(lineStart, lineEnd);
+      if (!rawLine.trim()) {
+        return <div key={`${keyPrefix}-empty`} className="doc-empty-line" />;
+      }
+
+      const headingMatch = rawLine.match(/^(\s*#{1,4}\s+)/);
+      if (headingMatch) {
+        const prefixLen = headingMatch[1].length;
+        const level = headingMatch[1].trim().length;
+        return (
+          <div
+            key={`${keyPrefix}-h`}
+            className={`doc-heading doc-heading-${Math.min(level, 3)}`}
+          >
+            {renderInlineFormattedText(
+              sourceText.slice(lineStart + prefixLen, lineEnd),
+              `${keyPrefix}-hc`
+            )}
+          </div>
+        );
+      }
+
+      const trimmed = rawLine.trim();
+      if (
+        trimmed.startsWith("**") &&
+        trimmed.endsWith("**") &&
+        trimmed.length > 4 &&
+        !trimmed.slice(2, -2).includes("**")
+      ) {
+        return (
+          <div key={`${keyPrefix}-bh`} className="doc-heading doc-heading-2">
+            {renderInlineFormattedText(trimmed.slice(2, -2), `${keyPrefix}-bhc`)}
+          </div>
+        );
+      }
+
+      const bulletMatch = rawLine.match(/^(\s*[-*•]\s+)/);
+      if (bulletMatch) {
+        const prefixLen = bulletMatch[1].length;
+        return (
+          <div key={`${keyPrefix}-li`} className="doc-bullet-item">
+            <span className="doc-bullet-dot" aria-hidden="true">
+              •
+            </span>
+            <span className="doc-bullet-content">
+              {renderInlineFormattedText(
+                sourceText.slice(lineStart + prefixLen, lineEnd),
+                `${keyPrefix}-lic`
+              )}
+            </span>
+          </div>
+        );
+      }
+
+      return (
+        <div key={`${keyPrefix}-p`} className="doc-line">
+          {renderInlineFormattedText(
+            sourceText.slice(lineStart, lineEnd),
+            `${keyPrefix}-lc`
+          )}
+        </div>
+      );
+    },
+    [sourceText]
+  );
+
+  const renderPlainDocSlice = useCallback(
+    (sliceStart: number, sliceEnd: number, keyPrefix: string) => {
+      if (sliceEnd <= sliceStart) return null;
+
+      const blocks: Array<{ start: number; end: number }> = [];
+      let cursor = sliceStart;
+      while (cursor < sliceEnd) {
+        while (
+          cursor < sliceEnd &&
+          (sourceText[cursor] === "\n" || sourceText[cursor] === "\r")
+        ) {
+          cursor++;
+        }
+        if (cursor >= sliceEnd) break;
+        let bEnd = cursor;
+        while (bEnd < sliceEnd) {
+          if (
+            sourceText[bEnd] === "\n" &&
+            bEnd + 1 < sliceEnd &&
+            sourceText[bEnd + 1] === "\n"
+          ) {
+            break;
+          }
+          bEnd++;
+        }
+        blocks.push({ start: cursor, end: bEnd });
+        cursor = bEnd;
+      }
+
+      return blocks.map((blk, bIdx) => {
+        const lines: React.ReactNode[] = [];
+        let lStart = blk.start;
+        let lIdx = 0;
+        while (lStart <= blk.end) {
+          let lEnd = sourceText.indexOf("\n", lStart);
+          if (lEnd === -1 || lEnd > blk.end) {
+            lEnd = blk.end;
+          }
+          lines.push(
+            renderPlainDocLine(
+              lStart,
+              lEnd,
+              `${keyPrefix}-b${bIdx}-l${lIdx++}`
+            )
+          );
+          if (lEnd === blk.end) break;
+          lStart = lEnd + 1;
+        }
+        return (
+          <div key={`${keyPrefix}-blk-${bIdx}`} className="doc-para">
+            {lines}
+          </div>
+        );
+      });
+    },
+    [sourceText, renderPlainDocLine]
+  );
+
+  const renderedClassifyDocument = useMemo(() => {
+    if (!sourceText) return null;
+    if (
+      !showInfoSectionHighlights ||
+      infoEditedSinceScan ||
+      charInfoFindings.length === 0
+    ) {
+      return renderPlainDocSlice(0, sourceText.length, "plain-full");
+    }
+
+    const elements: React.ReactNode[] = [];
+    let cursor = 0;
+
+    charInfoFindings.forEach((f, idx) => {
+      const fStart = Math.max(f.start, cursor);
+      const fEnd = Math.min(f.end, sourceText.length);
+      if (fEnd <= fStart) return;
+
+      if (fStart > cursor) {
+        elements.push(
+          renderPlainDocSlice(cursor, fStart, `info-before-${idx}`)
+        );
+      }
+
+      const isRed = f.level === "red";
+      elements.push(
+        <div
+          key={`info-para-${f.paragraphIndex}-${idx}`}
+          id={`info-para-${f.paragraphIndex}`}
+          className={`flagged-para-block ${
+            isRed ? "severity-high" : "severity-medium"
+          }`}
+        >
+          <div className="flagged-para-header">
+            <div className="flagged-para-top-row">
+              <span className="flagged-para-title">
+                <span className={`sev-pill ${isRed ? "high" : "medium"}`}>
+                  {isRed ? (
+                    <XCircle size={12} aria-hidden="true" />
+                  ) : (
+                    <AlertTriangle size={12} aria-hidden="true" />
+                  )}
+                  <span>
+                    {isRed
+                      ? "Röd · Kräver särskilt skydd"
+                      : "Gul · Var försiktig (Internt)"}
+                  </span>
+                </span>
+                <span>
+                  Avsnitt {f.paragraphIndex} · {f.category}
+                </span>
+              </span>
+              <span className="flagged-para-meta">
+                <span className="flagged-para-conf">
+                  {Math.round(f.confidence * 100)}% träffstyrka
+                </span>
+              </span>
+            </div>
+            <p className="flagged-para-explain">{f.reason}</p>
+          </div>
+          <div className="flagged-para-body">
+            {renderPlainDocSlice(fStart, fEnd, `info-in-${idx}`)}
+          </div>
+        </div>
+      );
+
+      cursor = fEnd;
+    });
+
+    if (cursor < sourceText.length) {
+      elements.push(
+        renderPlainDocSlice(cursor, sourceText.length, "info-after-all")
+      );
+    }
+
+    return elements;
+  }, [
+    sourceText,
+    showInfoSectionHighlights,
+    infoEditedSinceScan,
+    charInfoFindings,
+    renderPlainDocSlice,
+  ]);
+
   // Traffic light helpers
   const verdictBadge = (verdict: SafetyVerdict | undefined) => {
     switch (verdict) {
@@ -1740,6 +2054,7 @@ export default function App() {
   const aiBusy =
     analyzing ||
     classifying ||
+    infoClassifying ||
     gemmaLoading ||
     setupBusy ||
     (!nerReady && !setupError);
@@ -1747,6 +2062,10 @@ export default function App() {
     ? setupError
       ? "Väntar på modellinstallation"
       : "Förbereder lokal AI…"
+    : infoClassifying
+    ? gemmaScanProgress && gemmaScanProgress.total > 0
+      ? `Klassificerar (${gemmaScanProgress.chunk}/${gemmaScanProgress.total})…`
+      : "Klassificerar information…"
     : analyzing
     ? nerProgress && nerProgress.total > 0
       ? `Skannar (${nerProgress.chunk}/${nerProgress.total})…`
@@ -1816,18 +2135,53 @@ export default function App() {
       <header className="top-header">
         <div className="header-brand">
           <div className="brand-logo" aria-hidden="true">
-            <Shield size={20} />
+            {appMode === "classify" ? (
+              <FileSearch size={20} />
+            ) : (
+              <Shield size={20} />
+            )}
           </div>
           <div className="brand-titles">
             <h1 className="brand-title">Maskera</h1>
-            <span className="brand-tagline">Lokal avidentifiering för AI</span>
+            <span className="brand-tagline">
+              {appMode === "classify"
+                ? "Informationsklassning (Grön · Gul · Röd)"
+                : "Lokal avidentifiering för AI"}
+            </span>
           </div>
         </div>
+
+        {modelsChecked && !showFirstTimeSetup && (
+          <div
+            role="group"
+            aria-label="Arbetsläge"
+            className="app-mode-switcher"
+          >
+            <button
+              type="button"
+              className="mode-switch-btn"
+              aria-pressed={appMode === "mask"}
+              onClick={() => setAppMode("mask")}
+            >
+              <Shield size={15} aria-hidden="true" />
+              <span>Avidentifiera för AI</span>
+            </button>
+            <button
+              type="button"
+              className="mode-switch-btn"
+              aria-pressed={appMode === "classify"}
+              onClick={() => setAppMode("classify")}
+            >
+              <FileSearch size={15} aria-hidden="true" />
+              <span>Klassificera information</span>
+            </button>
+          </div>
+        )}
 
         <div className="header-status-pills">
           <span
             className={`status-pill ${
-              analyzing || classifying
+              analyzing || classifying || infoClassifying
                 ? "working"
                 : gemmaLoading || setupBusy || !nerReady
                 ? "loading"
@@ -2076,6 +2430,415 @@ export default function App() {
         }}
       />
 
+      {appMode === "classify" ? (
+        /* ── Alternativ B: Fristående läge för Informationsklassning (Grön / Gul / Röd) utan maskering ── */
+        <>
+          <div
+            role="toolbar"
+            focusgroup="toolbar wrap"
+            aria-label="Dokument och informationsklassning"
+            className="action-toolbar"
+          >
+            <div role="group" aria-label="Inmatning" className="toolbar-group">
+              <button
+                type="button"
+                className="tb-btn"
+                onClick={handlePasteClipboard}
+                title="Klistra in text från urklipp"
+              >
+                <Clipboard size={15} aria-hidden="true" />
+                <span>Klistra in</span>
+              </button>
+              <button
+                type="button"
+                className="tb-btn"
+                onClick={() => fileInputRef.current?.click()}
+                title="Öppna Word (.docx/.odt), Excel (.xlsx/.xls/.ods), PDF (.pdf) eller textfil"
+              >
+                {importingDoc ? (
+                  <RefreshCw size={15} className="spin" aria-hidden="true" />
+                ) : (
+                  <Upload size={15} aria-hidden="true" />
+                )}
+                <span>
+                  {importingDoc ? "Läser dokument…" : "Öppna dokument"}
+                </span>
+              </button>
+              <button
+                type="button"
+                className="tb-btn"
+                aria-disabled={!sourceText ? "true" : undefined}
+                onClick={() => {
+                  if (sourceText) handleClearDocument();
+                }}
+                title="Rensa aktuellt dokument och bedömning"
+              >
+                <Trash2 size={15} aria-hidden="true" />
+                <span>Rensa</span>
+              </button>
+            </div>
+
+            <span
+              role="separator"
+              aria-orientation="vertical"
+              className="tb-sep"
+            />
+
+            <div
+              role="group"
+              aria-label="Klassificering"
+              className="toolbar-group toolbar-group-end"
+            >
+              <button
+                type="button"
+                className="tb-btn-primary"
+                aria-disabled={
+                  !sourceText.trim() || infoClassifying ? "true" : undefined
+                }
+                onClick={handleClassifyInformation}
+              >
+                {infoClassifying ? (
+                  <RefreshCw size={15} className="spin" aria-hidden="true" />
+                ) : (
+                  <FileSearch size={15} aria-hidden="true" />
+                )}
+                <span>
+                  {infoClassifying
+                    ? "Klassificerar…"
+                    : "Klassificera (Grön / Gul / Röd)"}
+                </span>
+              </button>
+            </div>
+          </div>
+
+          {sourceText && infoClassifying && (
+            <section
+              aria-label="Status för informationsklassning"
+              className="safety-banner working-banner"
+            >
+              <div className="safety-main-row">
+                <RefreshCw size={15} className="spin" aria-hidden="true" />
+                <span>
+                  {gemmaScanProgress && gemmaScanProgress.total > 0
+                    ? `Analyserar innehåll mot Grön, Gul och Röd informationsnivå (avsnitt ${gemmaScanProgress.chunk}/${gemmaScanProgress.total})…`
+                    : "Analyserar dokumentets innehåll mot Grön, Gul och Röd informationsnivå…"}
+                </span>
+              </div>
+            </section>
+          )}
+
+          {sourceText && !infoClassifying && infoReport && (
+            <section
+              aria-label="Resultat av informationsklassning"
+              className="info-cards-grid"
+            >
+              {/* Kort 1 (MWG card: <article> med direkta <header>- och <div>-regioner): Fråga 1 — Vad innehåller informationen? */}
+              <article
+                className={`info-card level-${infoReport.level}`}
+              >
+                <header className="info-card-header">
+                  <div className="info-card-header-top">
+                    <span
+                      className={`info-level-badge level-${infoReport.level}`}
+                    >
+                      {infoReport.level === "green" ? (
+                        <CheckCircle2 size={15} aria-hidden="true" />
+                      ) : infoReport.level === "yellow" ? (
+                        <AlertTriangle size={15} aria-hidden="true" />
+                      ) : (
+                        <XCircle size={15} aria-hidden="true" />
+                      )}
+                      <span>{infoReport.badgeTitle}</span>
+                    </span>
+                    <span
+                      className="info-scan-meta"
+                      title={`Lokal analys med Regex, BERT NER och EmbeddingGemma 2 (${infoReport.scanDurationMs} ms)`}
+                    >
+                      {infoReport.paragraphsScanned} avsnitt ·{" "}
+                      {infoReport.scanDurationMs} ms
+                    </span>
+                  </div>
+                  <h2 className="info-card-title">
+                    1. Vad innehåller informationen?
+                  </h2>
+                </header>
+
+                <div className="info-card-content">
+                  <p className="info-lead">
+                    <strong>{infoReport.contentHeadline}.</strong>{" "}
+                    {infoReport.contentExplanation}
+                  </p>
+
+                  {infoReport.signals.length > 0 && (
+                    <ul className="info-signals-list" role="list">
+                      {infoReport.signals.map((sig, idx) => (
+                        <li key={`${sig.title}-${idx}`} className="info-signal-item">
+                          <span
+                            className={`sev-pill ${
+                              sig.level === "red"
+                                ? "high"
+                                : sig.level === "yellow"
+                                ? "medium"
+                                : "green"
+                            }`}
+                          >
+                            {sig.level === "red" ? (
+                              <XCircle size={11} aria-hidden="true" />
+                            ) : sig.level === "yellow" ? (
+                              <AlertTriangle size={11} aria-hidden="true" />
+                            ) : (
+                              <CheckCircle2 size={11} aria-hidden="true" />
+                            )}
+                            <span>
+                              {sig.level === "red"
+                                ? "Röd"
+                                : sig.level === "yellow"
+                                ? "Gul"
+                                : "Grön"}
+                            </span>
+                          </span>
+                          <div className="info-signal-text">
+                            <strong>{sig.title}</strong>
+                            <span>{sig.detail}</span>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </article>
+
+              {/* Kort 2 (MWG card): Fråga 2 — Hur får vi hantera informationen? */}
+              <article
+                className={`info-card guidance-card level-${infoReport.level}`}
+              >
+                <header className="info-card-header">
+                  <div className="info-card-header-top">
+                    <span className="info-step-pill">
+                      Vägledande beslutsstöd · Lagring &amp; delning
+                    </span>
+                  </div>
+                  <h2 className="info-card-title">
+                    2. {infoReport.handling.heading}
+                  </h2>
+                </header>
+
+                <div className="info-card-content">
+                  <p className="info-lead">{infoReport.handling.summary}</p>
+                  <dl className="info-guidance-dl">
+                    <div className="info-guidance-row">
+                      <dt>Lagring</dt>
+                      <dd>{infoReport.handling.storageGuidance}</dd>
+                    </div>
+                    <div className="info-guidance-row">
+                      <dt>Delning</dt>
+                      <dd>{infoReport.handling.sharingGuidance}</dd>
+                    </div>
+                    <div className="info-guidance-row">
+                      <dt>Exempel</dt>
+                      <dd>{infoReport.handling.examplesNote}</dd>
+                    </div>
+                  </dl>
+                  <p className="info-disclaimer">
+                    {infoReport.handling.disclaimer}
+                  </p>
+                </div>
+              </article>
+            </section>
+          )}
+
+          <main className="main-workspace classify-workspace">
+            <div className="panel-inner classify-panel-inner">
+              {!infoReport || !sourceText ? (
+                <div
+                  className={`textarea-wrapper ${isDragOver ? "dragover" : ""}`}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setIsDragOver(true);
+                  }}
+                  onDragLeave={() => setIsDragOver(false)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setIsDragOver(false);
+                    const f = e.dataTransfer.files?.[0];
+                    if (f) {
+                      handleImportFile(f);
+                    }
+                  }}
+                >
+                  <label
+                    htmlFor="classify-editor-textarea"
+                    className="visually-hidden"
+                  >
+                    Text eller dokument att klassificera (Grön, Gul eller Röd)
+                  </label>
+                  <textarea
+                    id="classify-editor-textarea"
+                    className="editor-textarea"
+                    placeholder={
+                      sourceText
+                        ? "Skriv eller klistra in text att klassificera…"
+                        : undefined
+                    }
+                    value={sourceText}
+                    onChange={(e) => handleSourceTextEdit(e.target.value)}
+                  />
+                  {!sourceText && (
+                    <div className="editor-empty-hint">
+                      <FileSearch size={32} aria-hidden="true" />
+                      <p>
+                        Klistra in text (Ctrl+V) eller dra och släpp Word
+                        (.docx), Excel (.xlsx), PDF (.pdf) eller .txt här för
+                        att få hjälp att bedöma om informationen är{" "}
+                        <strong>Grön</strong>, <strong>Gul</strong> eller{" "}
+                        <strong>Röd</strong> (ingen text maskeras).
+                      </p>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div
+                  className={`review-viewer-wrapper ${
+                    isDragOver ? "dragover" : ""
+                  }`}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setIsDragOver(true);
+                  }}
+                  onDragLeave={() => setIsDragOver(false)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setIsDragOver(false);
+                    const f = e.dataTransfer.files?.[0];
+                    if (f) {
+                      handleImportFile(f);
+                    }
+                  }}
+                >
+                  <div className="review-viewer-header">
+                    <span className="review-viewer-hint">
+                      {isEditingClassify
+                        ? "Redigerar text — kör ”Klassificera” igen när du vill uppdatera bedömningen."
+                        : infoEditedSinceScan
+                        ? "Texten har ändrats sedan senaste klassificeringen — uppdatera för ny bedömning."
+                        : charInfoFindings.length > 0
+                        ? "Originaltext (inga ord maskeras) — markerade avsnitt visar vad som gav utslag i klassningen."
+                        : "Originaltext (inga ord maskeras) — inga gula eller röda avsnitt identifierades."}
+                    </span>
+                    <div className="review-header-actions">
+                      {infoEditedSinceScan && (
+                        <button
+                          type="button"
+                          className="tb-btn-subtle rescan-chip"
+                          onClick={handleClassifyInformation}
+                          title="Kör om informationsklassningen på den ändrade texten"
+                        >
+                          <RefreshCw size={12} aria-hidden="true" />
+                          <span>Uppdatera klassning</span>
+                        </button>
+                      )}
+                      {charInfoFindings.length > 0 &&
+                        !isEditingClassify &&
+                        !infoEditedSinceScan && (
+                          <button
+                            type="button"
+                            className={`tb-preset-btn para-toggle-btn ${
+                              charInfoFindings.some((f) => f.level === "red")
+                                ? "has-high"
+                                : "only-medium"
+                            }`}
+                            aria-pressed={showInfoSectionHighlights}
+                            onClick={() =>
+                              setShowInfoSectionHighlights((v) => !v)
+                            }
+                            title="Visa eller dölj utmärkning av avsnitt som påverkade klassningen"
+                          >
+                            <AlertTriangle size={13} aria-hidden="true" />
+                            <span>
+                              Markerade avsnitt ({charInfoFindings.length})
+                            </span>
+                          </button>
+                        )}
+                      <button
+                        type="button"
+                        className="edit-source-btn"
+                        aria-pressed={isEditingClassify}
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => setIsEditingClassify((v) => !v)}
+                        title={
+                          isEditingClassify
+                            ? "Avsluta redigering och visa dokumentvyn (Esc)"
+                            : "Redigera texten"
+                        }
+                      >
+                        <Pencil size={13} aria-hidden="true" />
+                        <span>Ändra text</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {isEditingClassify ? (
+                    <textarea
+                      className="editor-textarea in-review-card"
+                      value={sourceText}
+                      autoFocus
+                      onChange={(e) => handleSourceTextEdit(e.target.value)}
+                      onBlur={() => {
+                        if (!document.hasFocus()) return;
+                        if (infoReport && sourceText.trim()) {
+                          setIsEditingClassify(false);
+                        }
+                      }}
+                      onKeyDown={(e) => {
+                        if (
+                          e.key === "Escape" &&
+                          infoReport &&
+                          sourceText.trim()
+                        ) {
+                          e.preventDefault();
+                          setIsEditingClassify(false);
+                        }
+                      }}
+                    />
+                  ) : (
+                    <div className="review-viewer-content">
+                      {renderedClassifyDocument}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="tab-footer">
+                <span className="footer-stats">
+                  {sourceText.length > 0 && (
+                    <>
+                      {fileName && (
+                        <>
+                          <strong>{fileName}</strong>
+                          {docSummary ? ` (${docSummary})` : ""} ·{" "}
+                        </>
+                      )}
+                      {sourceText.length} tecken ·{" "}
+                      {sourceText.split(/\s+/).filter(Boolean).length} ord
+                      {infoReport && !infoEditedSinceScan && (
+                        <>
+                          {" "}
+                          · Klassning:{" "}
+                          <strong>{infoReport.badgeTitle}</strong>
+                        </>
+                      )}
+                    </>
+                  )}
+                </span>
+                <span className="footer-stats">
+                  100 % lokal analys — inget skickas externt
+                </span>
+              </div>
+            </div>
+          </main>
+        </>
+      ) : (
+        <>
       {/* ── 2. Kompakt verktygsrad (Modern Web Guidance: role="toolbar") ── */}
       <div
         role="toolbar"
@@ -2955,6 +3718,8 @@ export default function App() {
           </div>
         </div>
       </main>
+        </>
+      )}
         </>
       )}
     </div>

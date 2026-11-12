@@ -1,6 +1,10 @@
 # Maskera
 
-Maskera är ett snabbt, helt lokalt skrivbordsverktyg för automatisk identifiering och maskering av personuppgifter (PII), tekniska hemligheter och känslig kontext i svenska texter — samt lokal återställning (avmaskering) av AI-svar. Allt körs **100 % lokalt** på din dator utan molnanrop.
+Maskera är ett snabbt, helt lokalt skrivbordsverktyg med **två fristående arbetslägen** i sidhuvudet:
+1. **Avidentifiera för AI** — automatisk identifiering och maskering av personuppgifter (PII), tekniska hemligheter och känslig kontext i svenska texter, samt lokal återställning (avmaskering) av AI-svar.
+2. **Klassificera information (Grön / Gul / Röd)** — fristående informationsklassning och hanteringsstöd för texter och dokument *utan att maskera texten*, uppdelat i två pedagogiska frågor: *1. Vad innehåller informationen?* och *2. Hur får vi hantera informationen?*
+
+Allt körs **100 % lokalt** på din dator utan molnanrop.
 
 ---
 
@@ -39,6 +43,20 @@ Klistra in text direkt från urklipp (`Ctrl+V` eller knappen **Klistra in**), sk
    - **Redigera utan att tappa maskeringar:** Klicka direkt i ett stycke (och klicka utanför för att spara) eller använd knappen **Ändra källtext** — befintliga maskeringar i övriga texten bevaras automatiskt.
    - **Kopiera & avmaskera formaterat:** Klicka **Kopiera maskerad**, skicka texten till valfri AI-tjänst och klistra in svaret under **Avmaskera AI-svar**. Svaret återställs lokalt med originalnamn och renderas som formaterad dokumenttext (utan råa `**`- och `###`-tecken) som kopieras med både rik formatering (för Word/Outlook/Teams) och ren text.
    - **Portabel dokumentexport & avmaskering (`.docx` / `.xlsx`):** Spara maskerade kopior av Word- och Excel-filer med bibehållen layout, stilar och formler (inklusive ord som Word delat över flera `<w:r><w:t>`-element), och återställ AI-bearbetade `.docx`/`.xlsx`-filer via **Avmaskera .docx / .xlsx-fil** helt utan installerat Office-paket.
+
+---
+
+## Fristående läge: Klassificera information (Grön / Gul / Röd)
+
+När du bara vill få hjälp att bedöma ett dokuments skyddsnivå inför lagring eller delning — utan att byta ut namn mot `[PERSON A]` — växlar du till **Klassificera information** i sidhuvudet. Läget bygger på en egen fristående Rust-modul ([`src-tauri/src/info_classification.rs`](src-tauri/src/info_classification.rs)) med ren JSON-datamodell, förberedd för att i ett senare skede kunna köras som ett separat system eller central servertjänst:
+
+1. **Fråga 1 — Vad innehåller informationen?**
+   - **GRÖN — Information som kan delas öppet:** Publicerade broschyrer, tidtabeller, offentliga verksamhetsbeskrivningar och öppet informationsmaterial utan interna utkastmarkeringar eller skyddsvärda uppgifter (publika funktionsmejladresser som `info@`/`kundtjanst@` och servicenummer som `1177`/`0771` ger inte falskt utslag).
+   - **GUL — Information som vi behöver vara försiktiga med:** Intern arbetsinformation som inte ska spridas fritt, men som kan delas med rätt kollegor — t.ex. vanliga APT- och mötesanteckningar, utkast till broschyrer, intern bemannings- och verksamhetsplanering, interna rutiner, intranätlänkar samt personkopplade kontaktuppgifter.
+   - **RÖD — Information som kräver särskilt skydd:** Uppgifter som kan orsaka skada för individ, verksamhet eller organisation — patient- och vårduppgifter, skyddade personuppgifter/socialtjänst/lagöverträdelser, sekretessbelagda upphandlingsuppgifter och affärshemligheter, **känsliga personalärenden (HR)** (rehabilitering, disciplinärenden, individlön), säkerhetssystem/sårbarheter, personnummer, SITHS-/kortnummer och kryptonycklar.
+2. **Fråga 2 — Hur får vi hantera informationen?**
+   - Visar pedagogisk vägledning för **lagring** och **delning** utifrån dokumentets färg (med tydlig påminnelse om att bedömningen är ett lokalt beslutsstöd som alltid stäms av mot verksamhetens fastställda riktlinjer).
+   - Dokumentet visas helt **omaskerat** nedanför med eventuella gula och röda avsnitt tydligt utmärkta och förklarade.
 
 ---
 

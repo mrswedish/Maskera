@@ -11,6 +11,7 @@ This file provides guidance when working with code in this repository.
    - **Layer 2 (Named Entities via `ort`):** `KBLab/bert-base-swedish-cased-ner` (quantized INT8 ONNX) with multi-threaded SIMD and length-sorted mini-batching (`BATCH_SIZE = 8`).
    - **Layer 3 (Semantic AI Gatekeeper via `EmbeddingGemma 2`):** `onnx-community/embeddinggemma-300m-ONNX` (`model_q4.onnx`, 768-dim L2-normalized embeddings) classifying document sections across privacy (GDPR Art. 9/10 health, crime/social services, SITHS/eID/intranet routines, HR), business secrets, and IT security, with inline paragraph highlighting in the review view.
 3. **Export & Local AI Response Unmasking:** One-click copy of masked text, format-preserving `.docx` (split-run-safe) and `.xlsx` export, and instant local unmasking of AI responses (or masked `.docx`/`.xlsx` files) using the in-memory translation table.
+4. **Standalone Information Classification Mode (`Klassificera information` — Grön / Gul / Röd):** Separate top-level workspace (`appMode === "classify"`) backed by self-contained [`src-tauri/src/info_classification.rs`](src-tauri/src/info_classification.rs) (`classify_information_document`), evaluating unmasked text/documents into **GRÖN** (open/public), **GUL** (internal care required: APT notes, drafts, operational planning, internal contacts/URLs), or **RÖD** (special protection: patient/health, social services/crime, confidential procurements, sensitive HR cases, security systems, SSN/cards/keys) alongside pedagogical storage & sharing guidance.
 
 ## Commands
 
@@ -20,7 +21,7 @@ npm run dev                                           # Start Vite dev server on
 npm run tauri dev                                     # Start full Tauri 2 desktop app with hot reload
 npm run build                                         # TypeScript check + Vite frontend build
 npm run tauri build                                   # Build production installer / portable binary
-cargo test --manifest-path src-tauri/Cargo.toml       # Run Rust unit tests (8 tests)
+cargo test --manifest-path src-tauri/Cargo.toml       # Run Rust unit tests (9 tests)
 ```
 
 ## Architecture
@@ -46,5 +47,6 @@ Tauri 2 shell (Rust) + React 19 / TypeScript WebView (WCAG 2.2 AA, Light/Dark/Sy
 | `src-tauri/src/lib.rs` | Tauri commands, HuggingFace streaming model downloaders, precompiled Swedish PII & secret regex engine, overlap resolution |
 | `src-tauri/src/ner.rs` | `ort` ONNX Runtime session for Swedish BERT NER, zero-copy paragraph/sentence chunker, parallel batch tokenization, batched inference |
 | `src-tauri/src/classifier.rs` | `EmbeddingGemma 2` (768d) semantic classifier, smart paragraph merging (`MERGE_TARGET_CHARS = 320`), Swedish anchor prototypes, traffic-light safety verdicts |
+| `src-tauri/src/info_classification.rs` | Self-contained **Grön / Gul / Röd** information-classification engine & handling guidance (decoupled from AI masking, ready for future standalone/server extraction) |
 | `src-tauri/src/documents.rs` | Pure-Rust portable import for `.docx`/`.odt`/`.xlsx`/`.xls`/`.ods`/`.pdf`/`.txt` and split-run-safe format-preserving `.docx` & `.xlsx` export |
 | `.github/workflows/build.yml` | GitHub Actions Windows build producing both NSIS setup installer and single-file `Maskera-portabel.exe` |

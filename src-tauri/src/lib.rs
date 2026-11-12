@@ -1,5 +1,6 @@
 mod classifier;
 mod documents;
+mod info_classification;
 mod ner;
 
 use std::path::{Path, PathBuf};
@@ -1338,6 +1339,55 @@ async fn export_masked_xlsx(
     .map_err(|e| format!("spawn_blocking-fel (export_xlsx): {e}"))?
 }
 
+#[tauri::command]
+async fn classify_information_document(
+    text: String,
+    app: AppHandle,
+) -> Result<info_classification::InfoClassificationReport, String> {
+    tauri::async_runtime::spawn_blocking(
+        move || -> Result<info_classification::InfoClassificationReport, String> {
+            let regex_labels: Vec<String> = vec![
+                "Personnummer".into(),
+                "E-post".into(),
+                "Telefonnummer".into(),
+                "Konto/Giro".into(),
+                "Kortnummer".into(),
+                "Hemlighet/Nyckel".into(),
+            ];
+            let regex_matches = run_regex(&text, &regex_labels);
+
+            let structural_matches =
+                if let (Some(model), Some(tokenizer)) = (SESSION.get(), TOKENIZER.get()) {
+                    let ner_labels = vec!["Person".to_string()];
+                    let ner_matches = ner::run_ner(
+                        &text,
+                        &ner_labels,
+                        0.72,
+                        model,
+                        tokenizer,
+                        |chunk, total| {
+                            let _ = app.emit("ner_progress", NerProgress { chunk, total });
+                        },
+                    );
+                    merge_regex_and_ner(regex_matches, ner_matches)
+                } else {
+                    regex_matches
+                };
+
+            Ok(info_classification::classify_information_text(
+                &text,
+                &structural_matches,
+                CLASSIFIER.get(),
+                |chunk, total| {
+                    let _ = app.emit("gemma_scan_progress", NerProgress { chunk, total });
+                },
+            ))
+        },
+    )
+    .await
+    .map_err(|e| format!("spawn_blocking-fel (classify_information_document): {e}"))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1356,6 +1406,7 @@ pub fn run() {
             download_gemma,
             load_gemma,
             classify_document,
+            classify_information_document,
             analyze_text,
             write_file,
             import_document_bytes,

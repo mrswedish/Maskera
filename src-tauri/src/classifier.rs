@@ -145,6 +145,7 @@ pub struct EmbeddingClassifier {
     tokenizer: Tokenizer,
     prototypes: Vec<EmbeddedPrototype>,
     neutral_vecs: Vec<Vec<f32>>,
+    pub info_index: crate::info_classification::InfoClassifierIndex,
 }
 
 fn l2_normalize(v: &mut [f32]) {
@@ -157,7 +158,7 @@ fn l2_normalize(v: &mut [f32]) {
     }
 }
 
-fn dot(a: &[f32], b: &[f32]) -> f32 {
+pub(crate) fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
@@ -194,6 +195,7 @@ impl EmbeddingClassifier {
             tokenizer,
             prototypes: Vec::new(),
             neutral_vecs: Vec::new(),
+            info_index: crate::info_classification::InfoClassifierIndex::empty(),
         };
 
         // Förberäkna alla ankar-vektorer en gång vid laddning
@@ -222,6 +224,8 @@ impl EmbeddingClassifier {
                 instance.neutral_vecs.push(vec);
             }
         }
+
+        instance.info_index = crate::info_classification::InfoClassifierIndex::build(&instance)?;
 
         Ok(instance)
     }
@@ -430,7 +434,7 @@ impl EmbeddingClassifier {
 
 /// Rensar Markdown-formatering (`#`, `**`, `__`, `` ` ``, listpunkter) före inbäddning
 /// så att råa formateringstecken inte förskjuter vektorlikheten.
-fn clean_for_embedding(slice: &str) -> String {
+pub(crate) fn clean_for_embedding(slice: &str) -> String {
     let mut lines_out = Vec::new();
     for line in slice.lines() {
         let mut l = line.trim();
@@ -456,7 +460,7 @@ fn clean_for_embedding(slice: &str) -> String {
 }
 
 /// Avgör om ett avsnitt bara är en fristående rubrik utan brödtextmeningar.
-fn is_standalone_heading(raw_slice: &str, clean_slice: &str) -> bool {
+pub(crate) fn is_standalone_heading(raw_slice: &str, clean_slice: &str) -> bool {
     let raw_trimmed = raw_slice.trim();
     let non_empty_lines: Vec<&str> = raw_trimmed
         .lines()
@@ -609,7 +613,7 @@ fn split_long_span(full: &str, p_start: usize, p_end: usize) -> Vec<(usize, usiz
     out
 }
 
-fn split_paragraphs(text: &str) -> Vec<(usize, usize, &str)> {
+pub(crate) fn split_paragraphs(text: &str) -> Vec<(usize, usize, &str)> {
     let mut raw_paras = Vec::new();
     let mut start = 0usize;
     let bytes = text.as_bytes();
