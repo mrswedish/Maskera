@@ -40,7 +40,11 @@ Lager 3 (`EmbeddingGemma 2`) är en inbäddningsmodell (*bi-encoder*) som omvand
 
 ### Varför `Gemma 4 E2B` (mobil/text-varianten) är en stark kandidat
 - **Byggd för lokal kantkörning (Edge):** Effektiv 2B-arkitektur med *Per-Layer Embeddings (PLE)* och upp till **128k tokens** kontextfönster.
-- **Hanterbar fotavtrycksstorlek:** Googles *Mobile Text-Only*-kvantisering ligger på ca **0,84 GB** (`.litertlm`) och 4-bitars `GGUF` kring **1,2–1,5 GB**, med ca 1,5–2,5 GB RAM vid körning — fullt körbart på vanliga kontorsdatorer (16 GB RAM) utan dedikerat grafikkort.
+- **Hanterbar fotavtrycksstorlek:** Googles *Mobile Text-Only*-kvantisering ligger på ca **0,84 GB** (`.litertlm`) och 4-bitars QAT `GGUF` (`Q4_K_XL`) på **2,62 GB**, fullt körbart på vanliga kontorsdatorer (16 GB RAM) helt på CPU.
+- **Verifierad vinnare i lokal CPU-benchmark (november 2026):** Jämfört mot rena textutmanare på exakt samma svenska 10-dokumentssvit (`n_gpu_layers = 0`):
+  - **`Gemma 4 E2B IT QAT` (`Q4_K_XL`, 2,62 GB):** **100 % (20/20)** giltig JSON, kortast svar (~38 tokens), naturlig svenska och ~28 % *snabbare* på ren CPU än `Qwen3-1.7B` tack vare PLE-arkitekturen och effektivare svensk tokenisering (~11–12,5 s på kontors-PC).
+  - **`Qwen3-1.7B` (`Q4_K_M`, 1,11 GB, non-thinking):** Långsammare på CPU (~70 ut-tokens, slog i taket i 7/20 körningar), svagare svensk grammatik och missade bl.a. pågående anbudssekretess.
+  - **`Gemma 3 1B IT QAT` (`Q4_0`, 0,72 GB):** Mycket snabb (~4–5 s), men för liten för pålitlig JSON-instruktionsföljning (kopierade promptmallen ordagrant i 11/20 körningar).
 - **Rätt svårighetsgrad på uppgiften:** Lager 4 behöver inte skriva långa fria texter, utan enbart göra en **avgränsad kontextuell rimlighetsbedömning** utifrån tydliga trafikljuskriterier.
 
 ### Föreslagen ”Tratt-arkitektur” (Cascade) för hög hastighet på CPU

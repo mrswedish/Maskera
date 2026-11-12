@@ -1772,7 +1772,8 @@ async fn classify_information_document(
                 }
 
                 if let Some(engine) = guard.as_mut() {
-                    let (raw_judge, judge_ms) = engine.assess_document(&text, &report)?;
+                    let (raw_judge, judge_ms) =
+                        engine.assess_document(&text, &report, &structural_matches)?;
                     info_judge::apply_judge_to_report(&mut report, raw_judge, judge_ms);
                 }
             }

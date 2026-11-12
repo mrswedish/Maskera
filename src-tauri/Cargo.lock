@@ -2550,7 +2550,7 @@ dependencies = [
 
 [[package]]
 name = "maskera"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "calamine",
  "futures-util",

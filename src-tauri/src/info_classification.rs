@@ -101,8 +101,9 @@ const INFO_GROUPS: &[InfoPrototypeGroup] = &[
         level: "red",
         reason: "Innehåller hälso-/patientuppgifter, sjukskrivning eller individkopplade elevuppgifter som omfattas av sekretess eller särskilt skydd.",
         prompts: &[
-            "Patientjournal för enskild patient, sjukdomshistoria, medicinsk diagnos, läkemedelsbehandling, psykiatrisk bedömning, sjukskrivning eller vårdkontakt.",
+            "Patientjournal för enskild patient, namngiven patients sjukdomshistoria, medicinsk diagnos, läkemedelsbehandling, psykiatrisk bedömning, sjukskrivning eller vårdkontakt.",
             "Beskrivning av en specifik persons fysiska eller psykiska hälsotillstånd, symtom, operation, provsvar, missbruk eller funktionsnedsättning.",
+            "Mottagningsanteckning, daganteckning eller epikris för namngiven patient som inkommer för uppföljning med smärta, symtom, röntgensvar, misstanke om tumör eller metastasering, läkemedelsdosering och remiss.",
             "Individuella elevuppgifter inom skola eller folkhögskola, elevhälsa, åtgärdsprogram, särskilt stöd, kränkningsärende eller känsliga studieomdömen om enskild elev.",
         ],
     },
@@ -122,6 +123,7 @@ const INFO_GROUPS: &[InfoPrototypeGroup] = &[
         reason: "Berör rehabsamtal, sjukskrivning, disciplinärende, individuellt löneunderlag eller enskilt anställningsavtal.",
         prompts: &[
             "Rehabsamtal, rehabiliteringsutredning för namngiven medarbetare, upprepad sjukfrånvaro, läkarintyg eller arbetsanpassning efter sjukskrivning.",
+            "Anteckning från uppföljningssamtal om namngiven medarbetare med sömnsvårigheter, hjärtklappning, stress eller utmattningssymtom, bedömning av företagshälsovårdens läkare, halvtidssjukskrivning och anpassade arbetsuppgifter.",
             "Skriftlig erinran, varning, misskötsamhet, disciplinärende, uppsägning av personliga skäl, avsked eller facklig tvisteförhandling kring enskild anställd.",
             "Individuellt löneunderlag med anställds månadslön, enskilt anställningsavtal med personliga villkor eller urvals- och bakgrundskontroll av namngiven kandidat.",
         ],
@@ -142,7 +144,7 @@ const INFO_GROUPS: &[InfoPrototypeGroup] = &[
         reason: "Innehåller uppgifter om krisberedskap, fysisk säkerhet (lås, larm, bevakning), inloggningsuppgifter/pinkoder eller tekniska sårbarheter och konfigurationer.",
         prompts: &[
             "Krisberedskap, beredskapsplan för samhällsviktig verksamhet, krigsorganisation, reservkraft, nödvatten, kontinuitetsplanering eller allvarlig säkerhetsincident.",
-            "Fysisk säkerhet med lås och larm, larmkoder, pinkoder, lösenord, inloggningsuppgifter, bevakningsrutiner, kameraövervakning av skyddsobjekt eller skalskydd.",
+            "Fysisk säkerhet med lås och larm, faktiska larmkoder, pinkoder, lösenord i klartext, inloggningsuppgifter, bevakningsrutiner, kameraövervakning av skyddsobjekt eller skalskydd.",
             "Känsliga tekniska konfigurationer, brandväggsregler, intern nätverkstopologi, sårbarhetsrapport, penetrationstest, SITHS-kort med PIN/PUK-kod eller säkerhetsincidenter.",
         ],
     },
@@ -154,7 +156,7 @@ const INFO_GROUPS: &[InfoPrototypeGroup] = &[
         reason: "Liknar interna APT-/mötesanteckningar eller en kollegas sammanfattning från kurs/seminarium avsedd för arbetsgruppen.",
         prompts: &[
             "Minnesanteckningar från arbetsplatsträff APT, enhetsmöte, veckomöte eller arbetsgruppsmöte om pågående arbete, lokala rutiner och uppföljning.",
-            "Sammanfattning av kursen jag gick, egna anteckningar från seminarium, konferens eller föreläsning som delas med kollegorna i arbetsgruppen.",
+            "Sammanfattning av kursen jag gick, egna anteckningar från seminarium, konferens, workshop eller föreläsning som delas med kollegorna i arbetsgruppen.",
         ],
     },
     InfoPrototypeGroup {
@@ -165,6 +167,15 @@ const INFO_GROUPS: &[InfoPrototypeGroup] = &[
             "Internt arbetsmaterial eller utkast på dokument som ännu inte är beslutade, ekonomiskt, administrativt eller kommunikationsrelaterat arbetsutkast.",
             "Interna styrdokument, arbetsinstruktioner, processbeskrivningar, kravspecifikationer eller lathund på intranätet för intern hantering inom avdelningen.",
             "Schema, bemanning och semesterplanering inom arbetsgruppen, fördelning av pass inför jul och sommar eller allmän ärendeinformation utan utpekade individer.",
+        ],
+    },
+    InfoPrototypeGroup {
+        category: "Verksamhetsutveckling, Vård-/Skolstrategi & Generella rutiner",
+        level: "yellow",
+        reason: "Diskuterar vård, patientjournaler, diagnoskodning, sekretess eller behörighetsrutiner på generell system- eller metodnivå utan enskilda individfall.",
+        prompts: &[
+            "Övergripande verksamhetsutveckling, workshop, AI-sammanfattning eller kartläggning inom hälso- och sjukvård, cancervård eller skola om personcentrering, samordning, kontaktsjuksköterskans roll, patientenkäter, vårdprocesser och resurser utan enskilda patienter.",
+            "Intern rutin, riktlinje eller instruktion om hur medarbetare generellt hanterar patientjournaler, diagnoskodning, sekretess, patientdatalagen, SITHS-kort, samordnad vårdplanering eller lösenordsbyte utan uppgifter om enskild patient eller faktiska koder.",
         ],
     },
     InfoPrototypeGroup {
@@ -181,6 +192,7 @@ const INFO_GROUPS: &[InfoPrototypeGroup] = &[
 /// som inte innehåller intern eller sekretessbelagd verksamhetsinformation.
 const INFO_GREEN_PROMPTS: &[&str] = &[
     "Publicerad informationsbroschyr för invånare, patientinformation för allmänheten, erbjudande, öppettider eller besöksinformation på extern webbplats.",
+    "Offentlig patientguide och invånarinformation på 1177 eller regionens externa webbplats om hur standardiserade vårdförlopp, cancerutredning, diagnosbesked, kontaktsjuksköterska och din journal via nätet fungerar för dig som invånare.",
     "Offentlig busstidtabell, tågtider, linjekarta, biljettpriser och reseinformation för kollektivtrafik på publik webb eller offentlig anslagstavla.",
     "Publicerat pressmeddelande, offentlig nyhetsartikel, öppen inbjudan till publik konferens eller information på offentlig anslagstavla.",
     "Publicerad verksamhetsbeskrivning, offentliggjord årsredovisning, öppen kurskatalog eller allmän informationstext som vi själva vill dela externt.",
@@ -332,32 +344,40 @@ fn has_training_or_seminar_document_context(text: &str) -> bool {
     TRAINING_MARKERS.iter().any(|m| intro.contains(m))
 }
 
-/// Kontrollerar om ett stycke innehåller konkreta markörer för ett faktiskt rött ärende
-/// (så att en äkta sekretessnotis aldrig missas ens om den råkar klistras in i ett kursdokument).
+/// Kontrollerar om ett stycke innehåller skarpa markörer för ett faktiskt rött individ-/sekretessärende.
+/// Obs: Breda allmänna substantiv (såsom "patient", "diagnos", "sjukskrivning", "socialtjänst" eller "lösenord")
+/// exkluderas medvetet här eftersom de förekommer i helt vanliga rutiner, strategidokument och 1177-texter.
 fn has_explicit_red_case_markers(slice: &str) -> bool {
     let lower = slice.to_lowercase();
     const RED_MARKERS: &[&str] = &[
-        "patient",
-        "diagnos",
-        "sjukskriv",
-        "läkarintyg",
+        "mottagningsanteckning",
+        "daganteckning",
+        "epikris",
+        "metastas",
         "rehabsamtal",
-        "rehabiliterings",
+        "rehabiliteringsutredning",
+        "utmattningssymtom",
+        "halvtidssjukskriv",
+        "heltidssjukskriv",
+        "elevhälsoteam",
+        "åtgärdsprogram",
         "orosanmälan",
-        "socialtjänst",
         "skyddade personuppgifter",
         "sekretessmarkering",
         "anbudspris",
         "anbudssekretess",
-        "tilldelningsbeslut",
+        "anbudsutvärdering",
+        "konfidentiellt beredningsunderlag",
+        "beredskapsplan",
         "larmkod",
         "pinkod",
-        "lösenord",
-        "sårbarhet",
-        "krisberedskap",
+        "puk-kod",
+        "cve-",
+        "opatchad",
+        "sårbarhetsrapport",
+        "penetrationstest",
         "bakgrundskontroll",
         "belastningsregister",
-        "anställningsavtal",
         "löneunderlag",
         "månadslön",
         "skriftlig varning",
@@ -594,7 +614,7 @@ where
                         } else if explicit_red_in_slice {
                             r_sim >= 0.770 && margin_vs_green >= 0.032 && margin_vs_yellow >= 0.002
                         } else {
-                            (r_sim >= 0.805 && margin_vs_green >= 0.050 && margin_vs_yellow >= 0.012)
+                            (r_sim >= 0.805 && margin_vs_green >= 0.048 && margin_vs_yellow >= 0.012)
                                 || (r_sim >= 0.835 && margin_vs_green >= 0.038 && margin_vs_yellow >= 0.008)
                         };
 
@@ -609,9 +629,9 @@ where
                                 grp.reason.to_string(),
                             ));
                         } else if !seminar_doc_context
-                            && r_sim >= 0.780
-                            && margin_vs_green >= 0.036
-                            && margin_vs_yellow >= 0.005
+                            && r_sim >= 0.785
+                            && margin_vs_green >= 0.038
+                            && margin_vs_yellow >= 0.006
                         {
                             // Gråzonsträff: liknar rött ämnesområde men når inte tröskeln för säker RÖD -> flagga som GUL gränsfallskontroll
                             let grp = &INFO_GROUPS[r_idx];
@@ -1079,6 +1099,63 @@ Vid vissa avancerade möten är hybridmöten inte att föredra som första alter
         assert_ne!(
             excerpt_rep.level, "red",
             "Generell metodtext om hybridmöten utan kurs-intro får inte heller klassas som RÖD"
+        );
+
+        // 12. GUL: Intern IT-/journalrutin med generella termer (patientjournaler, diagnos, sjukskrivning, lösenord)
+        let routine_doc = "\
+Rutin för behörighet, lösenordsbyte och dokumentation i patientjournaler\n\
+Fastställd av: Helena Berg, vård-IT (helena.berg@regionexempel.se)\n\n\
+Varje vårdkontakt ska dokumenteras sakligt i patientjournalen. Vid utskrivning anges huvuddiagnos enligt ICD-10 och vid behov av sjukskrivning utfärdas elektroniskt läkarintyg via journalsystemet. Reservlösenord byts var 90:e dag och får aldrig skrivas ned.";
+        let routine_matches = vec![Match {
+            text: "Helena Berg".to_string(),
+            label: "Person".to_string(),
+            start: routine_doc.find("Helena Berg").unwrap(),
+            end: routine_doc.find("Helena Berg").unwrap() + 11,
+            source: "kblab".to_string(),
+        }];
+        let routine_rep =
+            classify_information_text(routine_doc, &routine_matches, Some(&clf), |_, _| {});
+        println!("12. GUL Intern journal-/lösenordsrutin => level={}", routine_rep.level);
+        assert_eq!(
+            routine_rep.level, "yellow",
+            "Generell rutin som nämner patientjournal, diagnos, sjukskrivning och lösenord ska bli GUL, inte RÖD"
+        );
+
+        // 13. GRÖN: Publik 1177-invånarguide om cancerutredning, diagnos och journal på nätet
+        let public_1177_doc = "\
+Så fungerar standardiserat vårdförlopp vid misstanke om cancer — Information till dig som invånare på 1177.se\n\n\
+När din läkare på vårdcentralen misstänker att dina symtom kan bero på cancer kan du remitteras till ett standardiserat vårdförlopp (SVF) så att du får svar och eventuell diagnos så snabbt och tryggt som möjligt.\n\n\
+Du får kontakt med en kontaktsjuksköterska och kan läsa dina anteckningar i din patientjournal genom att logga in på 1177.se.";
+        let public_1177_rep =
+            classify_information_text(public_1177_doc, &[], Some(&clf), |_, _| {});
+        println!("13. GRÖN Publik 1177-guide => level={}", public_1177_rep.level);
+        assert_eq!(
+            public_1177_rep.level, "green",
+            "Publik 1177-invånarinformation om cancerutredning och patientjournal ska bli GRÖN"
+        );
+
+        // 14. RÖD: Klinisk patientanteckning helt utan personnummer
+        let clinical_no_pnr = "\
+Mottagningsanteckning — Onkologmottagningen\n\
+Patient: Karin Lindqvist, 64 år\n\n\
+Karin inkommer för uppföljning efter DT torax/buk med tilltagande ryggsmärta. Radiologin visar förändringar i kota L2–L3 med misstanke om skelettmetastasering. Vi justerar smärtlindringen med oxikodon 10 mg x 2 och skickar remiss till kurator.";
+        let clinical_rep = classify_information_text(clinical_no_pnr, &[], Some(&clf), |_, _| {});
+        println!("14. RÖD Klinisk patientnotis utan pnr => level={}", clinical_rep.level);
+        assert_eq!(
+            clinical_rep.level, "red",
+            "Verklig klinisk patientanteckning ska bli RÖD även när personnummer saknas"
+        );
+
+        // 15. RÖD: Mjukt formulerad HR-/rehabuppföljning utan ordet 'rehabsamtal'
+        let soft_rehab_doc = "\
+Anteckning från uppföljningssamtal — Enhet Ekonomi\n\
+Medarbetare: Anders Ek\n\n\
+Anders berättar att sömnsvårigheterna och hjärtklappningen har förvärrats efter vårens arbetsbelastning. Företagshälsovårdens läkare bedömer att det rör sig om utmattningssymtom och har förlängt hans halvtidssjukskrivning till den 30 november.";
+        let soft_rehab_rep = classify_information_text(soft_rehab_doc, &[], Some(&clf), |_, _| {});
+        println!("15. RÖD Mjuk HR-/rehabuppföljning => level={}", soft_rehab_rep.level);
+        assert_eq!(
+            soft_rehab_rep.level, "red",
+            "Individuell ohälso-/sjukskrivningsuppföljning ska bli RÖD även utan ordet rehabsamtal"
         );
     }
 }

@@ -16,6 +16,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::info_classification::{build_handling_guidance, InfoClassificationReport, InfoSignal};
+use crate::Match;
 
 pub const JUDGE_FILENAME: &str = "gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf";
 pub const JUDGE_HF_URL: &str =
@@ -188,11 +189,12 @@ impl JudgeEngine {
         &mut self,
         text: &str,
         report: &InfoClassificationReport,
+        structural_matches: &[Match],
     ) -> Result<(RawJudgeJson, u64), String> {
         let t0 = Instant::now();
         let vocab = self.model.vocab();
 
-        let user_turn = build_judge_user_turn(text, report);
+        let user_turn = build_judge_user_turn(text, report, structural_matches);
         // `add_special = false` eftersom `<bos>` redan ligger i den cachade systemprompten,
         // `parse_special = true` så att `<|turn>`, `<turn|>`, `<|channel>`, `<channel|>` tolkas som kontrolltokens.
         let mut doc_tokens = vocab.tokenize(user_turn.as_bytes(), false, true);
@@ -362,25 +364,70 @@ fn extract_document_headings(text: &str, max_headings: usize) -> Vec<String> {
     out
 }
 
+/// Extraherar korta textfönster runt unika `Person`-träffar från Lager 2 så att Lager 4 direkt ser
+/// om namnen avser uppdragstagare/kontaktpersoner i tjänsten (Gul) eller en faktisk patient/medarbetare (Röd).
+fn extract_person_context_snippets(
+    text: &str,
+    structural_matches: &[Match],
+    max_snippets: usize,
+) -> Vec<String> {
+    let mut seen_names: Vec<String> = Vec::new();
+    let mut snippets: Vec<String> = Vec::new();
+
+    for m in structural_matches {
+        if m.label != "Person" {
+            continue;
+        }
+        let norm = m.text.trim().to_lowercase();
+        if norm.len() < 3 || seen_names.contains(&norm) {
+            continue;
+        }
+        seen_names.push(norm);
+
+        let mut left = m.start.saturating_sub(45);
+        while left > 0 && !text.is_char_boundary(left) {
+            left -= 1;
+        }
+        let mut right = (m.end + 75).min(text.len());
+        while right < text.len() && !text.is_char_boundary(right) {
+            right += 1;
+        }
+        if left < right {
+            let window = strip_inline_data_uris(&text[left..right]);
+            let clean = window.replace('\n', " ");
+            snippets.push(format!("«{}»", clean.trim()));
+            if snippets.len() >= max_snippets {
+                break;
+            }
+        }
+    }
+    snippets
+}
+
 /// Invariant systemprefix som förberäknas i KV-cachen vid modellstart (slutar vid kontrolltoken `<turn|>`
 /// så att BPE-tokeniseringen mot efterföljande användartur alltid är exakt på tokengränsen).
 pub fn build_judge_system_prefix() -> String {
     let system_prompt = "\
 Du är Lager 4 (Judge) för svensk informationsklassning (green, yellow, red) i offentlig verksamhet.\n\
-Lager 3 granskar bara lösryckta stycken och kan feltolka kursreferat, utbildning, metoder eller allmänna rutiner/utkast som RED pga enstaka ord (t.ex. sekretess, samtal, upphandling, patientdatalagen).\n\
 Bedöm HELA DOKUMENTETS SYFTE:\n\
-- \"green\": Offentlig information för öppen spridning (broschyr, pressmeddelande, öppen info utan interna noteringar/personkoppling).\n\
-- \"yellow\": Intern arbetsinformation (utkast, intern rutin/lathund, kurs-/seminariereferat, APT-/mötesanteckning, schema, interna arbetskontakter/intranät).\n\
-- \"red\": Verkligt känsligt individärende (enskild patients/elevs vård/hälsa/utredning, enskild medarbetares rehab/sjukfrånvaro/disciplin/lön), skarp anbuds-/besluts-/säkerhetssekretess eller personnummer/konto/lösenord.\n\
- Om Lager 3 gav RED på generell rutin/utbildning/referat utan verkligt individärende: sätt \"l\":\"yellow\" (eller \"green\" om helt publikt) och \"d\":true.\n\
+- \"green\": Offentlig information för öppen spridning till invånare/allmänhet (t.ex. 1177-guide, publik broschyr, tidtabell, pressmeddelande utan interna noteringar/personkontakter).\n\
+- \"yellow\": Intern arbetsinformation inom verksamheten (utkast, intern rutin/riktlinje, kurs-/seminariereferat, strategisk verksamhetsutveckling/kartläggning, AI-sammanfattning av workshop, APT-/mötesanteckning, namngivna uppdragstagare/kontaktpersoner i tjänsten).\n\
+- \"red\": Verkligt känsligt individärende (enskild namngiven eller identifierbar patients/elevs faktiska hälsa, symtom, diagnos, vård eller utredning; enskild medarbetares faktiska sjukskrivning, ohälsa, utmattning, rehab, disciplin eller lön), skarp anbudssekretess med konkreta anbudspriser före tilldelning, konkret teknisk sårbarhet/lösenord i klartext, eller personnummer/bankkonto.\n\
+TVÅVÄGSKONTROLL:\n\
+1) SÄNK vid överlarm: Generella termer som patient, patientjournal, diagnos, cancervård, sjukskrivning, sekretess eller lösenord i strategidokument, verksamhetsutveckling, rutiner, kursreferat eller 1177-info är INTE \"red\" när ingen enskild privatpersons faktiska ohälsa/vård/rehab eller verkliga koder/anbud beskrivs -> sätt \"l\":\"yellow\" (eller \"green\" om helt publikt) och \"d\":true.\n\
+2) HÖJ vid underlarm: Om texten beskriver en specifik persons faktiska symtom, sjukdom, röntgensvar, medicinering, utmattning eller sjukskrivning/rehab (även utan personnummer och även om Lager 1–3 gav YELLOW) -> sätt ALLTID \"l\":\"red\" och \"d\":false.\n\
 Svara ENDAST på en rad JSON utan citattecken inne i textvärden: {\"t\":\"<dokumenttyp 2-4 ord på svenska>\",\"l\":\"green|yellow|red\",\"d\":true|false,\"r\":\"<1 kort mening på svenska, max 22 ord>\"}";
 
     format!("<bos><|turn>system\n{system_prompt}<turn|>")
 }
 
 /// Bygger den kompakta dokumentturen som läggs direkt efter det cachade systemprefixet.
-/// Prioriterar alltid eventuella RÖDA avsnitt från Lager 3 främst så att Judge alltid ser vad som triggade Röd.
-pub fn build_judge_user_turn(text: &str, report: &InfoClassificationReport) -> String {
+/// Prioriterar alltid eventuella RÖDA och gränsfallsflaggade avsnitt från Lager 3 främst.
+pub fn build_judge_user_turn(
+    text: &str,
+    report: &InfoClassificationReport,
+    structural_matches: &[Match],
+) -> String {
     let cleaned = strip_inline_data_uris(text);
     let trimmed_doc = cleaned.trim();
     let total_chars = trimmed_doc.chars().count();
@@ -413,20 +460,38 @@ pub fn build_judge_user_turn(text: &str, report: &InfoClassificationReport) -> S
         structural_signals.join("; ")
     };
 
-    // Sortera så att RÖDA stycken alltid visas före GULA och högst konfidens kommer först (max 4 utdrag).
+    let person_snippets = extract_person_context_snippets(text, structural_matches, 3);
+
+    // Sortera: 0 = RED, 1 = Gränsfall (YELLOW), 2 = vanlig YELLOW, därefter högst konfidens först.
     let mut prioritized_findings: Vec<_> = report.section_findings.iter().collect();
     prioritized_findings.sort_by(|a, b| {
-        let rank_a = if a.level == "red" { 0u8 } else { 1u8 };
-        let rank_b = if b.level == "red" { 0u8 } else { 1u8 };
-        rank_a.cmp(&rank_b).then_with(|| {
-            b.confidence
-                .partial_cmp(&a.confidence)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+        let rank = |lvl: &str, cat: &str| -> u8 {
+            if lvl == "red" {
+                0
+            } else if cat.starts_with("Gränsfall") {
+                1
+            } else {
+                2
+            }
+        };
+        rank(&a.level, &a.category)
+            .cmp(&rank(&b.level, &b.category))
+            .then_with(|| {
+                b.confidence
+                    .partial_cmp(&a.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     });
 
+    // Om dokumentet saknar både RÖDA och Gränsfalls-träffar räcker 2 korta GULA utdrag för att spara CPU-prefill.
+    let has_red_or_borderline = prioritized_findings
+        .iter()
+        .any(|f| f.level == "red" || f.category.starts_with("Gränsfall"));
+    let max_findings = if has_red_or_borderline { 4 } else { 2 };
+    let max_snip_chars = if has_red_or_borderline { 180 } else { 145 };
+
     let mut flagged_lines = Vec::new();
-    for f in prioritized_findings.into_iter().take(4) {
+    for f in prioritized_findings.into_iter().take(max_findings) {
         let raw_snippet = if f.end <= text.len()
             && f.start <= f.end
             && text.is_char_boundary(f.start)
@@ -436,7 +501,7 @@ pub fn build_judge_user_turn(text: &str, report: &InfoClassificationReport) -> S
         } else {
             strip_inline_data_uris(&f.preview).into_owned()
         };
-        let snippet = truncate_chars(&raw_snippet, 180);
+        let snippet = truncate_chars(&raw_snippet, max_snip_chars);
         flagged_lines.push(format!(
             "- #{p} [{lvl} | {cat}]: {snip}",
             p = f.paragraph_index,
@@ -453,16 +518,24 @@ pub fn build_judge_user_turn(text: &str, report: &InfoClassificationReport) -> S
 
     let mut user_prompt = format!(
         "Längd: {} tecken ({} stycken) | Lager 1–3: {}\n\
-Lager 1–2: {}\n\
-Rubriker: {}\n\
-Inledning: {}\n",
+Lager 1–2: {}\n",
         total_chars,
         report.paragraphs_scanned,
         report.level.to_uppercase(),
         structural_summary,
-        headings_line,
-        opening
     );
+
+    if !person_snippets.is_empty() {
+        user_prompt.push_str(&format!(
+            "Personomnämnanden i kontext: {}\n",
+            person_snippets.join(" | ")
+        ));
+    }
+
+    user_prompt.push_str(&format!(
+        "Rubriker: {}\nInledning: {}\n",
+        headings_line, opening
+    ));
 
     if !closing.is_empty() {
         user_prompt.push_str(&format!("Slut: {}\n", closing));
@@ -477,11 +550,15 @@ Inledning: {}\n",
 
 /// Bygger hela kaskadprompten (systemprefix + dokumenttur) för inspektion och enhetstester.
 #[cfg(test)]
-pub fn build_judge_prompt(text: &str, report: &InfoClassificationReport) -> String {
+pub fn build_judge_prompt(
+    text: &str,
+    report: &InfoClassificationReport,
+    structural_matches: &[Match],
+) -> String {
     format!(
         "{}{}",
         build_judge_system_prefix(),
-        build_judge_user_turn(text, report)
+        build_judge_user_turn(text, report, structural_matches)
     )
 }
 
@@ -934,18 +1011,66 @@ mod tests {
 
         let fake_b64 = "A".repeat(200);
         let doc = format!(
-            "Rutin Digital mötesform\n\n![](data:image/png;base64,{fake_b64})\n\nGemensam rutin."
+            "Rutin Digital mötesform\n\nUppdrag till Johan Styrske (Västerbotten).\n\n![](data:image/png;base64,{fake_b64})\n\nGemensam rutin."
         );
-        let turn = build_judge_user_turn(&doc, &report);
-        let full = build_judge_prompt(&doc, &report);
+        let person_start = doc.find("Johan Styrske").unwrap();
+        let matches = vec![Match {
+            text: "Johan Styrske".to_string(),
+            label: "Person".to_string(),
+            start: person_start,
+            end: person_start + "Johan Styrske".len(),
+            source: "kblab".to_string(),
+        }];
+        let turn = build_judge_user_turn(&doc, &report, &matches);
+        let full = build_judge_prompt(&doc, &report, &matches);
 
         assert!(full.starts_with("<bos><|turn>system\n"));
         assert!(!turn.contains(&fake_b64), "base64-bilddata ska rensas bort ur Judge-prompten");
         assert!(turn.contains("[bild]"));
         assert!(
+            turn.contains("Personomnämnanden i kontext:") && turn.contains("Johan Styrske (Västerbotten)"),
+            "personomnämnanden med omgivande kontext ska skickas med till Lager 4"
+        );
+        assert!(
             turn.contains("#9 [RED"),
             "det röda avsnittet (#9) måste alltid prioriteras före gula avsnitt"
         );
         assert!(turn.ends_with(PREFILL_JSON_PREFIX));
+    }
+
+    #[test]
+    fn judge_upgrades_yellow_to_red_on_individual_case_without_personnummer() {
+        let mut report = InfoClassificationReport {
+            level: "yellow".to_string(),
+            badge_title: "Förslag: GUL — Intern försiktighet".to_string(),
+            content_headline: "Maskinell bedömning: Indikerar GUL (intern) information".to_string(),
+            content_explanation: "Preliminär text.".to_string(),
+            signals: vec![InfoSignal {
+                level: "yellow".to_string(),
+                source: "struktur".to_string(),
+                title: "Icke-publicerade person-/kontaktuppgifter (1 personnamn)".to_string(),
+                detail: "Personnamn i intern text.".to_string(),
+            }],
+            handling: build_handling_guidance("yellow"),
+            section_findings: Vec::new(),
+            paragraphs_scanned: 3,
+            scan_duration_ms: 150,
+            semantic_available: true,
+            judge: None,
+        };
+
+        let raw = parse_raw_judge_json(
+            r#"{"t":"Mottagningsanteckning onkologi","l":"red","d":false,"r":"Beskriver namngiven patients faktiska cancersymtom, röntgensvar och smärtbehandling."}"#,
+        )
+        .expect("valid JSON");
+
+        apply_judge_to_report(&mut report, raw, 2500);
+
+        assert_eq!(report.level, "red");
+        let judge = report.judge.as_ref().expect("judge metadata attached");
+        assert_eq!(judge.layer3_level, "yellow");
+        assert_eq!(judge.final_level, "red");
+        assert!(judge.level_adjusted);
+        assert!(!judge.hard_veto_applied);
     }
 }
