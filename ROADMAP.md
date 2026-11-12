@@ -101,7 +101,8 @@ Eftersom klassificeringsmotorn (`src-tauri/src/info_classification.rs`) är frik
 
 | Etapp | Fokusområde | Insats | Effekt |
 |---|---|---|---|
-| **Etapp 1** | **Externa klassningsprofiler (JSON):** Konfigurerbara gröna/gula/röda typexempel och lagringsanvisningar utan omkompilering | Låg | Superanvändare/infosäk kan kalibrera exempel löpande |
-| **Etapp 2** | **Titlar & roller (Steg 1A):** Svensk sammansättnings- och ordlistemotor i Lager 1 + valbart filter `Roll/Titel` (`[ROLL A]`) | Låg–Medel | Skyddar mot bakvägsidentifiering via unika befattningar (0 MB extra) |
-| **Etapp 3** | **Lager 4 PoC (`Gemma 4 E2B`):** Fristående prototyp/benchmark av `LiteRT-LM` vs. `GGUF` på kontors-CPU med tratt-arkitektur och låst JSON | Medel | Löser kontextfällan i Lager 3 (skiljer metod/utbildning från skarpt ärende) |
-| **Etapp 4** | **Finjusterad BERT (`Steg 1B`) & ev. Server-API:** Kontexthantering av roller i Lager 2 samt möjlighet att köra `info_classification` som central intern mikrotjänst | Medel–Hög | Skalbar organisationslösning med noll klientunderhåll för klassificering |
+| **Etapp 1** | **Lager 4 (`Gemma 4 E2B` Judge i *Klassificera information*):** Valbar lokal helhetsbedömning (`llama.cpp` / `GGUF` QAT Q4_K_XL, ~2,62 GB) med tratt-arkitektur, låst GBNF-JSON, Lager 1-vetorätt och en-klicks avinstallation | ✅ **Klar i v0.6.0** | Löser kontextfällan i Lager 3 (skiljer t.ex. kursreferat/metod från skarpt ärende) |
+| **Etapp 2** | **Externa klassningsprofiler (JSON):** Konfigurerbara gröna/gula/röda typexempel och lagringsanvisningar utan omkompilering | Låg | Superanvändare/infosäk kan kalibrera exempel löpande |
+| **Etapp 3** | **Titlar & roller (Steg 1A):** Svensk sammansättnings- och ordlistemotor i Lager 1 + valbart filter `Roll/Titel` (`[ROLL A]`) | Låg–Medel | Skyddar mot bakvägsidentifiering via unika befattningar (0 MB extra) |
+| **Etapp 4** | **Finjusterad BERT (`Steg 1B`) & ev. Server-API:** Kontexthantering av roller i Lager 2 samt möjlighet att köra `info_classification` + större `Gemma 4`-modell som central intern servertjänst | Medel–Hög | Skalbar organisationslösning med noll klientunderhåll för klassificering |
+

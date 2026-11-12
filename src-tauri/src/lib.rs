@@ -1,10 +1,12 @@
 mod classifier;
 mod documents;
 mod info_classification;
+mod info_judge;
 mod ner;
 
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 use classifier::{build_report, ClassificationReport, EmbeddingClassifier, ParagraphFinding};
 use ner::{Match, NerModel};
@@ -18,6 +20,8 @@ use tokenizers::Tokenizer;
 static SESSION: OnceLock<NerModel> = OnceLock::new();
 static TOKENIZER: OnceLock<Tokenizer> = OnceLock::new();
 static CLASSIFIER: OnceLock<EmbeddingClassifier> = OnceLock::new();
+static JUDGE_ENGINE: Mutex<Option<info_judge::JudgeEngine>> = Mutex::new(None);
+static JUDGE_CANCEL: AtomicBool = AtomicBool::new(false);
 
 /// Filer för KBLab BERT NER (med ungefärlig storlek i byte för jämn total-progressbar)
 const MODEL_FILES: &[(&str, &str, u64)] = &[
@@ -144,6 +148,22 @@ struct SetupProgress {
     label: String,
     downloaded_bytes: u64,
     total_bytes: u64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JudgeDownloadProgress {
+    phase: String,
+    label: String,
+    downloaded_bytes: u64,
+    total_bytes: u64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InfoClassifyPhase {
+    phase: String,
+    message: String,
 }
 
 // ── Hjälpfunktioner för kataloger ─────────────────────────────────────────────
@@ -1339,13 +1359,360 @@ async fn export_masked_xlsx(
     .map_err(|e| format!("spawn_blocking-fel (export_xlsx): {e}"))?
 }
 
+// ── Lager 4 (Judge / Helhetsbedömning — enbart för Klassificera information) ─
+
+fn judge_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = models_dir(app)?.join("judge");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Kan inte skapa judge-katalog: {e}"))?;
+    Ok(dir)
+}
+
+fn is_valid_judge_gguf(path: &Path) -> bool {
+    path.is_file()
+        && std::fs::metadata(path)
+            .map(|m| m.len() >= 100_000_000)
+            .unwrap_or(false)
+}
+
+fn resolve_existing_judge_file(app: &AppHandle) -> Option<PathBuf> {
+    if let Ok(jdir) = judge_dir(app) {
+        let p = jdir.join(info_judge::JUDGE_FILENAME);
+        if is_valid_judge_gguf(&p) {
+            return Some(p);
+        }
+    }
+    if let Ok(mdir) = models_dir(app) {
+        let p = mdir.join(info_judge::JUDGE_FILENAME);
+        if is_valid_judge_gguf(&p) {
+            return Some(p);
+        }
+    }
+    for cand in candidate_bundled_model_dirs(app) {
+        let sub = cand.join("judge").join(info_judge::JUDGE_FILENAME);
+        if is_valid_judge_gguf(&sub) {
+            return Some(sub);
+        }
+        let direct = cand.join(info_judge::JUDGE_FILENAME);
+        if is_valid_judge_gguf(&direct) {
+            return Some(direct);
+        }
+    }
+    None
+}
+
+fn build_judge_status(app: &AppHandle) -> info_judge::JudgeModelStatus {
+    let loaded = JUDGE_ENGINE
+        .lock()
+        .map(|g| g.is_some())
+        .unwrap_or(false);
+    let existing = resolve_existing_judge_file(app);
+    let file_size_bytes = existing
+        .as_ref()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .unwrap_or(0);
+    info_judge::JudgeModelStatus {
+        installed: existing.is_some(),
+        loaded,
+        file_size_bytes,
+        expected_bytes: info_judge::JUDGE_EXPECTED_BYTES,
+        model_name: info_judge::JUDGE_MODEL_LABEL.to_string(),
+    }
+}
+
+#[tauri::command]
+fn check_judge_status(app: AppHandle) -> Result<info_judge::JudgeModelStatus, String> {
+    Ok(build_judge_status(&app))
+}
+
+#[tauri::command]
+fn cancel_judge_download() -> Result<(), String> {
+    JUDGE_CANCEL.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
+async fn ensure_judge_loaded(app: AppHandle) -> Result<info_judge::JudgeModelStatus, String> {
+    let already_loaded = JUDGE_ENGINE
+        .lock()
+        .map_err(|e| format!("Låsfel för Lager 4: {e}"))?
+        .is_some();
+    if already_loaded {
+        return Ok(build_judge_status(&app));
+    }
+
+    let path = resolve_existing_judge_file(&app).ok_or_else(|| {
+        "Lager 4-modellen (Gemma 4 E2B) är inte nedladdad på datorn ännu.".to_string()
+    })?;
+
+    let _ = app.emit(
+        "judge_download_progress",
+        JudgeDownloadProgress {
+            phase: "loading".into(),
+            label: "Laddar in Lager 4 (Gemma 4 E2B) i arbetsminnet…".into(),
+            downloaded_bytes: info_judge::JUDGE_EXPECTED_BYTES,
+            total_bytes: info_judge::JUDGE_EXPECTED_BYTES,
+        },
+    );
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let engine = info_judge::JudgeEngine::load(&path)?;
+        let mut guard = JUDGE_ENGINE
+            .lock()
+            .map_err(|e| format!("Låsfel för Lager 4: {e}"))?;
+        *guard = Some(engine);
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking-fel (ensure_judge_loaded): {e}"))??;
+
+    let _ = app.emit(
+        "judge_download_progress",
+        JudgeDownloadProgress {
+            phase: "ready".into(),
+            label: "Lager 4 (Judge) är redo.".into(),
+            downloaded_bytes: info_judge::JUDGE_EXPECTED_BYTES,
+            total_bytes: info_judge::JUDGE_EXPECTED_BYTES,
+        },
+    );
+
+    Ok(build_judge_status(&app))
+}
+
+#[tauri::command]
+async fn download_and_load_judge(app: AppHandle) -> Result<info_judge::JudgeModelStatus, String> {
+    use futures_util::StreamExt;
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+
+    JUDGE_CANCEL.store(false, Ordering::SeqCst);
+
+    if resolve_existing_judge_file(&app).is_none() {
+        let jdir = judge_dir(&app)?;
+        let dest = jdir.join(info_judge::JUDGE_FILENAME);
+        let tmp = jdir.join(format!("{}.part", info_judge::JUDGE_FILENAME));
+
+        let _ = app.emit(
+            "judge_download_progress",
+            JudgeDownloadProgress {
+                phase: "downloading".into(),
+                label: "Ansluter och hämtar Lager 4 (Gemma 4 E2B)…".into(),
+                downloaded_bytes: 0,
+                total_bytes: info_judge::JUDGE_EXPECTED_BYTES,
+            },
+        );
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(7200))
+            .build()
+            .map_err(|e| format!("HTTP-klient-fel vid hämtning av Lager 4: {e}"))?;
+
+        let resp = client
+            .get(info_judge::JUDGE_HF_URL)
+            .send()
+            .await
+            .map_err(|e| format!("Nätverksfel vid hämtning av Lager 4: {e}"))?;
+
+        if !resp.status().is_success() {
+            return Err(format!(
+                "Serverfel (HTTP {}) vid hämtning av Lager 4-modellen.",
+                resp.status()
+            ));
+        }
+
+        let total_bytes = resp
+            .content_length()
+            .unwrap_or(info_judge::JUDGE_EXPECTED_BYTES)
+            .max(1);
+
+        let mut file = std::fs::File::create(&tmp)
+            .map_err(|e| format!("Kunde inte skapa temporär fil på disk: {e}"))?;
+        let mut downloaded: u64 = 0;
+        let mut stream = resp.bytes_stream();
+        let mut last_emit = Instant::now()
+            .checked_sub(Duration::from_millis(120))
+            .unwrap_or_else(Instant::now);
+
+        while let Some(chunk) = stream.next().await {
+            if JUDGE_CANCEL.load(Ordering::SeqCst) {
+                drop(file);
+                let _ = std::fs::remove_file(&tmp);
+                let _ = app.emit(
+                    "judge_download_progress",
+                    JudgeDownloadProgress {
+                        phase: "cancelled".into(),
+                        label: "Nedladdningen avbröts.".into(),
+                        downloaded_bytes: 0,
+                        total_bytes,
+                    },
+                );
+                return Err("Nedladdningen avbröts.".to_string());
+            }
+
+            let chunk =
+                chunk.map_err(|e| format!("Läsfel under hämtning av Lager 4: {e}"))?;
+            file.write_all(&chunk).map_err(|e| {
+                format!(
+                    "Skrivfel till disk (kontrollera ledigt lagringsutrymme ~2,6 GB): {e}"
+                )
+            })?;
+            downloaded += chunk.len() as u64;
+
+            if last_emit.elapsed() >= Duration::from_millis(60) {
+                last_emit = Instant::now();
+                let _ = app.emit(
+                    "judge_download_progress",
+                    JudgeDownloadProgress {
+                        phase: "downloading".into(),
+                        label: "Hämtar Lager 4 (Gemma 4 E2B)…".into(),
+                        downloaded_bytes: downloaded,
+                        total_bytes: total_bytes.max(downloaded),
+                    },
+                );
+            }
+        }
+
+        drop(file);
+        if std::fs::rename(&tmp, &dest).is_err() {
+            std::fs::copy(&tmp, &dest)
+                .map_err(|e| format!("Kunde inte spara modellfilen för Lager 4: {e}"))?;
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
+    ensure_judge_loaded(app).await
+}
+
+#[tauri::command]
+async fn import_judge_from_dir(
+    src_dir: String,
+    app: AppHandle,
+) -> Result<info_judge::JudgeModelStatus, String> {
+    let root = PathBuf::from(&src_dir);
+    if !root.exists() {
+        return Err("Den valda mappen eller filen finns inte.".into());
+    }
+
+    let found_gguf: Option<PathBuf> = if root.is_file() {
+        Some(root)
+    } else {
+        let search_dirs = [
+            root.clone(),
+            root.join("judge"),
+            root.join("models"),
+            root.join("models").join("judge"),
+        ];
+        let mut candidate: Option<PathBuf> = None;
+        for d in &search_dirs {
+            let exact = d.join(info_judge::JUDGE_FILENAME);
+            if is_valid_judge_gguf(&exact) {
+                candidate = Some(exact);
+                break;
+            }
+        }
+        if candidate.is_none() {
+            for d in &search_dirs {
+                if let Ok(entries) = std::fs::read_dir(d) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        let is_gguf = p
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .map(|e| e.eq_ignore_ascii_case("gguf"))
+                            .unwrap_or(false);
+                        if is_gguf && is_valid_judge_gguf(&p) {
+                            candidate = Some(p);
+                            break;
+                        }
+                    }
+                }
+                if candidate.is_some() {
+                    break;
+                }
+            }
+        }
+        candidate
+    };
+
+    let src_file = found_gguf.ok_or_else(|| {
+        format!(
+            "Hittade ingen giltig GGUF-modellfil (t.ex. {}) i den valda mappen.",
+            info_judge::JUDGE_FILENAME
+        )
+    })?;
+
+    let dest = judge_dir(&app)?.join(info_judge::JUDGE_FILENAME);
+    if src_file != dest {
+        let src_clone = src_file.clone();
+        let dest_clone = dest.clone();
+        let _ = app.emit(
+            "judge_download_progress",
+            JudgeDownloadProgress {
+                phase: "loading".into(),
+                label: "Kopierar lokal Lager 4-modellfil…".into(),
+                downloaded_bytes: 0,
+                total_bytes: info_judge::JUDGE_EXPECTED_BYTES,
+            },
+        );
+        tauri::async_runtime::spawn_blocking(move || std::fs::copy(&src_clone, &dest_clone))
+            .await
+            .map_err(|e| format!("spawn_blocking-fel (kopiera GGUF): {e}"))?
+            .map_err(|e| format!("Kunde inte kopiera GGUF-filen: {e}"))?;
+    }
+
+    ensure_judge_loaded(app).await
+}
+
+#[tauri::command]
+async fn delete_judge_model(app: AppHandle) -> Result<info_judge::JudgeModelStatus, String> {
+    JUDGE_CANCEL.store(true, Ordering::SeqCst);
+
+    // Frigör LlamaModel ur RAM först så att Windows släpper filhandtaget (mmap) innan borttagning!
+    {
+        let mut guard = JUDGE_ENGINE
+            .lock()
+            .map_err(|e| format!("Låsfel vid avinstallation av Lager 4: {e}"))?;
+        *guard = None;
+    }
+
+    if let Ok(jdir) = judge_dir(&app) {
+        let main_file = jdir.join(info_judge::JUDGE_FILENAME);
+        let part_file = jdir.join(format!("{}.part", info_judge::JUDGE_FILENAME));
+        if main_file.exists() {
+            std::fs::remove_file(&main_file)
+                .map_err(|e| format!("Kunde inte ta bort modellfilen på disk: {e}"))?;
+        }
+        if part_file.exists() {
+            let _ = std::fs::remove_file(&part_file);
+        }
+    }
+    if let Ok(mdir) = models_dir(&app) {
+        let alt_file = mdir.join(info_judge::JUDGE_FILENAME);
+        if alt_file.exists() {
+            let _ = std::fs::remove_file(&alt_file);
+        }
+    }
+
+    Ok(build_judge_status(&app))
+}
+
 #[tauri::command]
 async fn classify_information_document(
     text: String,
+    use_judge: Option<bool>,
     app: AppHandle,
 ) -> Result<info_classification::InfoClassificationReport, String> {
+    let run_judge = use_judge.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(
         move || -> Result<info_classification::InfoClassificationReport, String> {
+            let _ = app.emit(
+                "info_classify_phase",
+                InfoClassifyPhase {
+                    phase: "layer1_3".into(),
+                    message: "Steg 1: Granskar struktur och enskilda stycken (Lager 1–3)…".into(),
+                },
+            );
+
             let regex_labels: Vec<String> = vec![
                 "Personnummer".into(),
                 "E-post".into(),
@@ -1374,14 +1741,42 @@ async fn classify_information_document(
                     regex_matches
                 };
 
-            Ok(info_classification::classify_information_text(
+            let mut report = info_classification::classify_information_text(
                 &text,
                 &structural_matches,
                 CLASSIFIER.get(),
                 |chunk, total| {
                     let _ = app.emit("gemma_scan_progress", NerProgress { chunk, total });
                 },
-            ))
+            );
+
+            if run_judge {
+                let _ = app.emit(
+                    "info_classify_phase",
+                    InfoClassifyPhase {
+                        phase: "layer4".into(),
+                        message: "Steg 2: Lager 4 (Judge · Gemma 4 E2B) bedömer dokumentets helhet och sammanhang…".into(),
+                    },
+                );
+
+                let mut guard = JUDGE_ENGINE
+                    .lock()
+                    .map_err(|e| format!("Låsfel för Lager 4 (Judge): {e}"))?;
+
+                if guard.is_none() {
+                    let path = resolve_existing_judge_file(&app).ok_or_else(|| {
+                        "Lager 4-modellen (Gemma 4 E2B) är inte installerad ännu. Aktivera och ladda ner den via knappen Helhetsbedömning (Lager 4).".to_string()
+                    })?;
+                    *guard = Some(info_judge::JudgeEngine::load(&path)?);
+                }
+
+                if let Some(engine) = guard.as_mut() {
+                    let (raw_judge, judge_ms) = engine.assess_document(&text, &report)?;
+                    info_judge::apply_judge_to_report(&mut report, raw_judge, judge_ms);
+                }
+            }
+
+            Ok(report)
         },
     )
     .await
@@ -1405,6 +1800,12 @@ pub fn run() {
             gemma_exists,
             download_gemma,
             load_gemma,
+            check_judge_status,
+            ensure_judge_loaded,
+            download_and_load_judge,
+            cancel_judge_download,
+            import_judge_from_dir,
+            delete_judge_model,
             classify_document,
             classify_information_document,
             analyze_text,

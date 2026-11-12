@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::classifier::{
     clean_for_embedding, dot, is_standalone_heading, split_paragraphs, EmbeddingClassifier,
 };
+use crate::info_judge::JudgeAssessment;
 use crate::Match;
 
 /// Svenskt bankkontonummer med clearingnummer (t.ex. "8327-9, 123 456 789-0" eller "clearing 8105-9 konto 943 122 811-2")
@@ -45,6 +46,8 @@ pub struct InfoClassificationReport {
     pub paragraphs_scanned: usize,
     pub scan_duration_ms: u64,
     pub semantic_available: bool,
+    /// Valbar helhetsbedömning från Lager 4 (Judge / Gemma 4 E2B) när användaren aktiverat den
+    pub judge: Option<JudgeAssessment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -843,6 +846,7 @@ where
         paragraphs_scanned,
         scan_duration_ms,
         semantic_available,
+        judge: None,
     }
 }
 

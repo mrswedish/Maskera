@@ -40,6 +40,8 @@ import type {
   SetupProgress,
   InfoClassificationReport,
   InfoSectionFinding,
+  JudgeModelStatus,
+  JudgeDownloadProgress,
 } from "./types";
 import {
   buildTranslationTable,
@@ -265,6 +267,34 @@ export default function App() {
   const [infoEditedSinceScan, setInfoEditedSinceScan] = useState(false);
   const [showInfoSectionHighlights, setShowInfoSectionHighlights] =
     useState(true);
+
+  // Lager 4 (Judge / Helhetsbedömning med Gemma 4 E2B — aktivt tillval enbart i Klassificera information)
+  const [judgeStatus, setJudgeStatus] = useState<JudgeModelStatus>({
+    installed: false,
+    loaded: false,
+    fileSizeBytes: 0,
+    expectedBytes: 2_620_400_000,
+    modelName: "Gemma 4 E2B (Q4_K_XL · 2,62 GB)",
+  });
+  const [judgeEnabled, setJudgeEnabled] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("maskera-judge-enabled") === "true";
+    } catch {
+      return false;
+    }
+  });
+  const [judgeDialogMode, setJudgeDialogMode] = useState<"activate" | "manage">(
+    "activate"
+  );
+  const [judgeBusy, setJudgeBusy] = useState(false);
+  const [judgeProgress, setJudgeProgress] =
+    useState<JudgeDownloadProgress | null>(null);
+  const [judgeError, setJudgeError] = useState<string | null>(null);
+  const [infoClassifyPhase, setInfoClassifyPhase] = useState<{
+    phase: string;
+    message: string;
+  } | null>(null);
+  const judgeDialogRef = useRef<HTMLDialogElement>(null);
 
   // Flikar (i AI-avidentifieringsläget)
   const [activeTab, setActiveTab] = useState<"mask" | "table" | "unmask">("mask");
@@ -557,9 +587,30 @@ export default function App() {
           setGemmaDownloadProgress(e.payload);
         }
       ),
+      listen<JudgeDownloadProgress>("judge_download_progress", (e) => {
+        if (!active) return;
+        setJudgeProgress(e.payload);
+      }),
+      listen<{ phase: string; message: string }>("info_classify_phase", (e) => {
+        if (!active) return;
+        setInfoClassifyPhase(e.payload);
+      }),
     ]).then((fns) => {
       unlisteners.push(...fns);
     });
+
+    invoke<JudgeModelStatus>("check_judge_status")
+      .then((jst) => {
+        if (!active) return;
+        setJudgeStatus(jst);
+        if (!jst.installed) {
+          setJudgeEnabled(false);
+          try {
+            localStorage.removeItem("maskera-judge-enabled");
+          } catch {}
+        }
+      })
+      .catch(() => {});
 
     invoke<ModelsStatus>("check_models_status")
       .then((st) => {
@@ -868,15 +919,20 @@ export default function App() {
   }, []);
 
   // Klassificera dokument enligt signalsystemet (Grön / Gul / Röd) utan att maskera texten
-  const handleClassifyInformation = async () => {
+  const runInfoClassification = async (forceJudge?: boolean) => {
     if (!sourceText.trim() || infoClassifying) return;
+    const useJudge =
+      forceJudge !== undefined
+        ? forceJudge
+        : Boolean(judgeEnabled && judgeStatus.installed);
     setInfoClassifying(true);
     setNerProgress(null);
     setGemmaScanProgress(null);
+    setInfoClassifyPhase(null);
     try {
       const res = await invoke<InfoClassificationReport>(
         "classify_information_document",
-        { text: sourceText }
+        { text: sourceText, useJudge }
       );
       setInfoReport(res);
       setInfoEditedSinceScan(false);
@@ -887,8 +943,152 @@ export default function App() {
       setInfoClassifying(false);
       setNerProgress(null);
       setGemmaScanProgress(null);
+      setInfoClassifyPhase(null);
     }
   };
+
+  const handleClassifyInformation = () => {
+    void runInfoClassification();
+  };
+
+  // Hantera Lager 4 (Judge / Helhetsbedömning — aktivt val i Klassificera information)
+  const setJudgeEnabledPersisted = useCallback((enabled: boolean) => {
+    setJudgeEnabled(enabled);
+    try {
+      if (enabled) {
+        localStorage.setItem("maskera-judge-enabled", "true");
+      } else {
+        localStorage.removeItem("maskera-judge-enabled");
+      }
+    } catch {}
+  }, []);
+
+  const handleToggleJudgeToolbar = useCallback(async () => {
+    setJudgeError(null);
+    // Uppdatera diskstatus innan vi avgör om installationsdialogen ska öppnas
+    let current = judgeStatus;
+    try {
+      current = await invoke<JudgeModelStatus>("check_judge_status");
+      setJudgeStatus(current);
+    } catch {}
+
+    if (!current.installed) {
+      setJudgeDialogMode("activate");
+      setJudgeProgress(null);
+      judgeDialogRef.current?.showModal();
+      return;
+    }
+
+    const next = !judgeEnabled;
+    setJudgeEnabledPersisted(next);
+    if (next && !current.loaded) {
+      // Ladda in modellen i RAM i bakgrunden så att nästa klick på Klassificera går direkt
+      invoke<JudgeModelStatus>("ensure_judge_loaded")
+        .then((st) => setJudgeStatus(st))
+        .catch(() => {});
+    }
+  }, [judgeStatus, judgeEnabled, setJudgeEnabledPersisted]);
+
+  const handleOpenManageJudgeDialog = useCallback(async () => {
+    setJudgeError(null);
+    setJudgeProgress(null);
+    try {
+      const st = await invoke<JudgeModelStatus>("check_judge_status");
+      setJudgeStatus(st);
+    } catch {}
+    setJudgeDialogMode("manage");
+    judgeDialogRef.current?.showModal();
+  }, []);
+
+  const handleConfirmActivateJudge = useCallback(async () => {
+    if (judgeBusy) return;
+    setJudgeError(null);
+    setJudgeBusy(true);
+    try {
+      const st = await invoke<JudgeModelStatus>("download_and_load_judge");
+      setJudgeStatus(st);
+      setJudgeEnabledPersisted(true);
+      setJudgeBusy(false);
+      setJudgeProgress(null);
+      judgeDialogRef.current?.close();
+    } catch (e) {
+      setJudgeBusy(false);
+      const msg = String(e);
+      if (!msg.includes("avbröts")) {
+        setJudgeError(msg);
+      } else {
+        setJudgeProgress(null);
+      }
+    }
+  }, [judgeBusy, setJudgeEnabledPersisted]);
+
+  const handleCancelJudgeDownload = useCallback(async () => {
+    try {
+      await invoke("cancel_judge_download");
+    } catch {}
+  }, []);
+
+  const handleImportJudgeLocalDir = useCallback(async () => {
+    if (judgeBusy) return;
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Välj mapp med Lager 4-modell (Gemma 4 E2B .gguf)",
+      });
+      if (!selected || typeof selected !== "string") return;
+      setJudgeError(null);
+      setJudgeBusy(true);
+      const st = await invoke<JudgeModelStatus>("import_judge_from_dir", {
+        srcDir: selected,
+      });
+      setJudgeStatus(st);
+      setJudgeEnabledPersisted(true);
+      setJudgeBusy(false);
+      setJudgeProgress(null);
+      judgeDialogRef.current?.close();
+    } catch (e) {
+      setJudgeBusy(false);
+      setJudgeError(String(e));
+    }
+  }, [judgeBusy, setJudgeEnabledPersisted]);
+
+  const handleDeleteJudgeModel = useCallback(async () => {
+    if (judgeBusy) return;
+    setJudgeError(null);
+    setJudgeBusy(true);
+    try {
+      const st = await invoke<JudgeModelStatus>("delete_judge_model");
+      setJudgeStatus(st);
+      setJudgeEnabledPersisted(false);
+      setJudgeBusy(false);
+      setJudgeProgress(null);
+      judgeDialogRef.current?.close();
+    } catch (e) {
+      setJudgeBusy(false);
+      setJudgeError(String(e));
+    }
+  }, [judgeBusy, setJudgeEnabledPersisted]);
+
+  // MWG light-dismiss-a-dialog: JS-fallback för webbläsare som saknar inbyggt HTMLDialogElement.closedBy
+  const handleJudgeDialogBackdropClick = useCallback(
+    (e: React.MouseEvent<HTMLDialogElement>) => {
+      if (judgeBusy) return;
+      if ("closedBy" in HTMLDialogElement.prototype) return;
+      const dialogEl = judgeDialogRef.current;
+      if (!dialogEl || e.target !== dialogEl) return;
+      const rect = dialogEl.getBoundingClientRect();
+      const clickedInDialog =
+        rect.top <= e.clientY &&
+        e.clientY <= rect.bottom &&
+        rect.left <= e.clientX &&
+        e.clientX <= rect.right;
+      if (!clickedInDialog) {
+        dialogEl.close();
+      }
+    },
+    [judgeBusy]
+  );
 
   // Analysera text (Steg 1: Regex + BERT NER, Steg 2: EmbeddingGemma 2)
   const handleAnalyze = async () => {
@@ -2063,7 +2263,9 @@ export default function App() {
       ? "Väntar på modellinstallation"
       : "Förbereder lokal AI…"
     : infoClassifying
-    ? gemmaScanProgress && gemmaScanProgress.total > 0
+    ? infoClassifyPhase?.phase === "layer4"
+      ? "Lager 4 bedömer helheten…"
+      : gemmaScanProgress && gemmaScanProgress.total > 0
       ? `Klassificerar (${gemmaScanProgress.chunk}/${gemmaScanProgress.total})…`
       : "Klassificerar information…"
     : analyzing
@@ -2486,9 +2688,56 @@ export default function App() {
 
             <div
               role="group"
-              aria-label="Klassificering"
+              aria-label="Klassificering och helhetsbedömning"
               className="toolbar-group toolbar-group-end"
             >
+              <button
+                type="button"
+                className="tb-btn judge-toggle-btn"
+                aria-pressed={
+                  judgeStatus.installed ? judgeEnabled : undefined
+                }
+                aria-haspopup={!judgeStatus.installed ? "dialog" : undefined}
+                onClick={handleToggleJudgeToolbar}
+                title={
+                  !judgeStatus.installed
+                    ? "Aktivera Lager 4 (Judge-funktionen) för lokal helhetsbedömning av hela dokumentet (~2,6 GB engångsnedladdning)"
+                    : judgeEnabled
+                    ? "Lager 4 (Judge) är aktiverat — klicka för att stänga av och enbart köra snabb styckeanalys (Lager 1–3)"
+                    : "Klicka för att slå på Lager 4 (Judge) vid klassificering"
+                }
+              >
+                <Sparkles size={14} aria-hidden="true" />
+                <span>Helhetsbedömning (Lager 4)</span>
+                <span
+                  className={`judge-state-pill ${
+                    !judgeStatus.installed
+                      ? "opt-in"
+                      : judgeEnabled
+                      ? "on"
+                      : "off"
+                  }`}
+                >
+                  {!judgeStatus.installed
+                    ? "Tillval"
+                    : judgeEnabled
+                    ? "Aktiv"
+                    : "Av"}
+                </span>
+              </button>
+
+              {judgeStatus.installed && (
+                <button
+                  type="button"
+                  className="tb-btn judge-remove-toolbar-btn"
+                  onClick={handleOpenManageJudgeDialog}
+                  title="Visa lagringsinfo eller ta bort Lager 4-modellen från datorn och frigör ~2,6 GB"
+                >
+                  <Trash2 size={14} aria-hidden="true" />
+                  <span>Ta bort Lager 4 (~2,6 GB)</span>
+                </button>
+              )}
+
               <button
                 type="button"
                 className="tb-btn-primary"
@@ -2504,12 +2753,255 @@ export default function App() {
                 )}
                 <span>
                   {infoClassifying
-                    ? "Klassificerar…"
+                    ? infoClassifyPhase?.phase === "layer4"
+                      ? "Bedömer helhet (Lager 4)…"
+                      : "Klassificerar…"
+                    : judgeEnabled && judgeStatus.installed
+                    ? "Klassificera + Helhet (Lager 4)"
                     : "Klassificera (Grön / Gul / Röd)"}
                 </span>
               </button>
             </div>
           </div>
+
+          {/* Native modal <dialog> för aktivt val, nedladdning och borttagning av Lager 4 (MWG dialog & light-dismiss-a-dialog) */}
+          <dialog
+            ref={judgeDialogRef}
+            closedby={judgeBusy ? "none" : "any"}
+            aria-labelledby="judge-dialog-title"
+            className="judge-dialog"
+            onCancel={(e) => {
+              if (judgeBusy) e.preventDefault();
+            }}
+            onClick={handleJudgeDialogBackdropClick}
+          >
+            <div className="judge-dialog-inner">
+              <header className="judge-dialog-header">
+                <div className="setup-icon-badge" aria-hidden="true">
+                  <Sparkles size={20} />
+                </div>
+                <div className="judge-dialog-title-wrap">
+                  <h2 id="judge-dialog-title" className="judge-dialog-title">
+                    {judgeDialogMode === "manage" && judgeStatus.installed
+                      ? "Hantera Lager 4 — Helhetsbedömning (Judge)"
+                      : "Aktivera Lager 4 — Helhetsbedömning (Judge)"}
+                  </h2>
+                  <p className="judge-dialog-subtitle">
+                    Aktivt tillval enbart för vyn{" "}
+                    <strong>Klassificera information</strong> · 100 % lokalt på
+                    din dator
+                  </p>
+                </div>
+              </header>
+
+              <div className="judge-dialog-body">
+                <div className="judge-comparison-grid">
+                  <div className="judge-compare-card">
+                    <strong>Lager 3 (Standard · styckenivå)</strong>
+                    <p>
+                      Granskar texten stycke för stycke på under 1 sekund. Kan
+                      ibland ge för högt utslag (t.ex. Röd på ett kursreferat)
+                      när enstaka ord liknar känsliga ämnen utan att modellen
+                      ser helheten.
+                    </p>
+                  </div>
+                  <div className="judge-compare-card highlight">
+                    <strong>Lager 4 — Judge (Helhetsbedömning)</strong>
+                    <p>
+                      En lokal språkmodell (<em>Gemma 4 E2B</em>) läser
+                      dokumentets inledning, rubriker, avslutning och flaggade
+                      stycken för att bedöma{" "}
+                      <strong>dokumentets helhet och syfte</strong> samt ge en
+                      kort motivering på svenska.
+                    </p>
+                  </div>
+                </div>
+
+                <dl className="judge-facts-list">
+                  <div className="judge-fact-row">
+                    <dt>Lagringsutrymme</dt>
+                    <dd>
+                      {judgeStatus.installed && judgeStatus.fileSizeBytes > 0 ? (
+                        <>
+                          Installerad lokalt på datorn (
+                          <strong>
+                            {(
+                              judgeStatus.fileSizeBytes / 1_000_000_000
+                            ).toFixed(2).replace(".", ",")}{" "}
+                            GB
+                          </strong>
+                          ). Du kan när som helst ta bort modellen nedan för att
+                          frigöra utrymmet.
+                        </>
+                      ) : (
+                        <>
+                          Kräver ca <strong>2,62 GB</strong> ledigt
+                          lagringsutrymme (engångsnedladdning, därefter helt
+                          offline). Kan tas bort med ett klick när du vill
+                          frigöra utrymmet.
+                        </>
+                      )}
+                    </dd>
+                  </div>
+                  <div className="judge-fact-row">
+                    <dt>Tidsåtgång</dt>
+                    <dd>
+                      Tar lite längre tid vid klassificering — räkna med ca{" "}
+                      <strong>3–8 sekunder extra</strong> per dokument medan
+                      modellen tolkar helheten.
+                    </dd>
+                  </div>
+                  <div className="judge-fact-row">
+                    <dt>Beslutsstöd &amp; säkerhet</dt>
+                    <dd>
+                      Ingen text lämnar datorn. Skarpa fynd i Lager 1
+                      (personnummer, bankkonton, kortnummer och lösenord/nycklar)
+                      har alltid vetorätt för <strong>RÖD</strong> nivå — och
+                      det är alltid du som fattar det slutliga beslutet.
+                    </dd>
+                  </div>
+                </dl>
+
+                {judgeBusy && (
+                  <div className="setup-progress-section judge-progress-box">
+                    <div
+                      id="judge-progress-label"
+                      className="setup-progress-meta"
+                      role="status"
+                      aria-live="polite"
+                    >
+                      <span className="setup-progress-status">
+                        {judgeProgress?.label || "Förbereder Lager 4…"}
+                      </span>
+                      {judgeProgress?.phase === "downloading" &&
+                        judgeProgress.totalBytes > 0 && (
+                          <span className="setup-progress-bytes">
+                            {(
+                              judgeProgress.downloadedBytes / 1_000_000_000
+                            )
+                              .toFixed(2)
+                              .replace(".", ",")}{" "}
+                            av{" "}
+                            {(judgeProgress.totalBytes / 1_000_000_000)
+                              .toFixed(2)
+                              .replace(".", ",")}{" "}
+                            GB (
+                            {Math.min(
+                              100,
+                              Math.max(
+                                1,
+                                Math.round(
+                                  (judgeProgress.downloadedBytes /
+                                    judgeProgress.totalBytes) *
+                                    100
+                                )
+                              )
+                            )}{" "}
+                            %)
+                          </span>
+                        )}
+                    </div>
+                    <progress
+                      className="setup-progress-bar"
+                      aria-labelledby="judge-progress-label"
+                      max={100}
+                      value={
+                        judgeProgress?.phase === "downloading" &&
+                        judgeProgress.totalBytes > 0
+                          ? Math.min(
+                              100,
+                              Math.max(
+                                1,
+                                Math.round(
+                                  (judgeProgress.downloadedBytes /
+                                    judgeProgress.totalBytes) *
+                                    100
+                                )
+                              )
+                            )
+                          : undefined
+                      }
+                    />
+                  </div>
+                )}
+
+                {judgeError && (
+                  <div className="setup-error-box" role="alert">
+                    <div className="setup-error-header">
+                      <AlertTriangle size={15} aria-hidden="true" />
+                      <strong>Åtgärden kunde inte slutföras</strong>
+                    </div>
+                    <p className="setup-error-detail">{judgeError}</p>
+                  </div>
+                )}
+              </div>
+
+              <footer className="judge-dialog-footer">
+                {judgeDialogMode === "manage" && judgeStatus.installed ? (
+                  <>
+                    <button
+                      type="button"
+                      className="tb-btn"
+                      disabled={judgeBusy}
+                      onClick={() => judgeDialogRef.current?.close()}
+                    >
+                      <span>Stäng</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="tb-btn judge-danger-btn"
+                      disabled={judgeBusy}
+                      onClick={handleDeleteJudgeModel}
+                    >
+                      <Trash2 size={15} aria-hidden="true" />
+                      <span>
+                        {judgeBusy
+                          ? "Tar bort modellfil…"
+                          : "Ta bort Lager 4 & frigör ~2,6 GB"}
+                      </span>
+                    </button>
+                  </>
+                ) : judgeBusy ? (
+                  <>
+                    <button
+                      type="button"
+                      className="tb-btn"
+                      onClick={handleCancelJudgeDownload}
+                    >
+                      <span>Avbryt nedladdning</span>
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      className="tb-btn"
+                      onClick={() => judgeDialogRef.current?.close()}
+                    >
+                      <span>Avbryt</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="tb-btn"
+                      onClick={handleImportJudgeLocalDir}
+                      title="Importera GGUF-filen offline från lokal mapp eller USB"
+                    >
+                      <FolderOpen size={15} aria-hidden="true" />
+                      <span>Välj lokal mapp…</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="tb-btn-primary"
+                      onClick={handleConfirmActivateJudge}
+                    >
+                      <Download size={15} aria-hidden="true" />
+                      <span>Bekräfta &amp; ladda ner (~2,6 GB)</span>
+                    </button>
+                  </>
+                )}
+              </footer>
+            </div>
+          </dialog>
 
           {sourceText && infoClassifying && (
             <section
@@ -2519,8 +3011,10 @@ export default function App() {
               <div className="safety-main-row">
                 <RefreshCw size={15} className="spin" aria-hidden="true" />
                 <span>
-                  {gemmaScanProgress && gemmaScanProgress.total > 0
-                    ? `Analyserar innehåll mot Grön, Gul och Röd informationsnivå (avsnitt ${gemmaScanProgress.chunk}/${gemmaScanProgress.total})…`
+                  {infoClassifyPhase?.phase === "layer4"
+                    ? infoClassifyPhase.message
+                    : gemmaScanProgress && gemmaScanProgress.total > 0
+                    ? `Steg 1: Analyserar enskilda stycken (Lager 1–3 · avsnitt ${gemmaScanProgress.chunk}/${gemmaScanProgress.total})…`
                     : "Analyserar dokumentets innehåll mot Grön, Gul och Röd informationsnivå…"}
                 </span>
               </div>
@@ -2552,10 +3046,22 @@ export default function App() {
                     </span>
                     <span
                       className="info-scan-meta"
-                      title={`Lokal analys med Regex, BERT NER och EmbeddingGemma 2 (${infoReport.scanDurationMs} ms)`}
+                      title={
+                        infoReport.judge
+                          ? `Lager 1–3: ${infoReport.scanDurationMs} ms · Lager 4 (Judge): ${infoReport.judge.durationMs} ms`
+                          : `Lokal analys med Regex, BERT NER och EmbeddingGemma 2 (${infoReport.scanDurationMs} ms)`
+                      }
                     >
                       {infoReport.paragraphsScanned} avsnitt ·{" "}
-                      {infoReport.scanDurationMs} ms
+                      {infoReport.judge
+                        ? `${(
+                            (infoReport.scanDurationMs +
+                              infoReport.judge.durationMs) /
+                            1000
+                          )
+                            .toFixed(1)
+                            .replace(".", ",")} s (inkl. Lager 4)`
+                        : `${infoReport.scanDurationMs} ms`}
                     </span>
                   </div>
                   <h2 className="info-card-title">
@@ -2568,6 +3074,71 @@ export default function App() {
                     <strong>{infoReport.contentHeadline}.</strong>{" "}
                     {infoReport.contentExplanation}
                   </p>
+
+                  {infoReport.judge ? (
+                    <div className="info-judge-box" role="note">
+                      <div className="info-judge-header">
+                        <span className="info-judge-badge">
+                          <Sparkles size={12} aria-hidden="true" />
+                          <span>Lager 4 · Judge (Helhet)</span>
+                        </span>
+                        <span className="info-judge-doctype">
+                          {infoReport.judge.documentType}
+                        </span>
+                        {infoReport.judge.hardVetoApplied ? (
+                          <span className="info-judge-delta veto">
+                            Lager 1-veto: RÖD behålls
+                          </span>
+                        ) : infoReport.judge.levelAdjusted ? (
+                          <span className="info-judge-delta adjusted">
+                            Justerad{" "}
+                            {infoReport.judge.layer3Level === "red"
+                              ? "Röd"
+                              : infoReport.judge.layer3Level === "yellow"
+                              ? "Gul"
+                              : "Grön"}{" "}
+                            →{" "}
+                            {infoReport.judge.finalLevel === "red"
+                              ? "Röd"
+                              : infoReport.judge.finalLevel === "yellow"
+                              ? "Gul"
+                              : "Grön"}
+                          </span>
+                        ) : (
+                          <span className="info-judge-delta confirmed">
+                            Bekräftar{" "}
+                            {infoReport.judge.finalLevel === "red"
+                              ? "Röd"
+                              : infoReport.judge.finalLevel === "yellow"
+                              ? "Gul"
+                              : "Grön"}
+                          </span>
+                        )}
+                      </div>
+                      <p className="info-judge-rationale">
+                        {infoReport.judge.rationale}
+                      </p>
+                    </div>
+                  ) : (
+                    judgeEnabled &&
+                    judgeStatus.installed &&
+                    !infoEditedSinceScan && (
+                      <div className="info-judge-rerun-hint">
+                        <span>
+                          Lager 4 (Judge) är nu aktiverat men ingick inte i
+                          denna körning.
+                        </span>
+                        <button
+                          type="button"
+                          className="tb-btn-subtle rescan-chip"
+                          onClick={() => void runInfoClassification(true)}
+                        >
+                          <Sparkles size={12} aria-hidden="true" />
+                          <span>Kör helhetsbedömning (Lager 4)</span>
+                        </button>
+                      </div>
+                    )
+                  )}
 
                   {infoReport.signals.length > 0 && (
                     <ul className="info-signals-list" role="list">

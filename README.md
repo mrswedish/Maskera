@@ -9,6 +9,17 @@ Allt körs **100 % lokalt** på din dator utan molnanrop.
 
 ---
 
+## Nedladdning & Versioner (GitHub Releases)
+
+På [GitHub Releases](https://github.com/mrswedish/Maskera/releases) finns både den senaste versionen och föregående version utan Lager 4 sparade:
+
+| Version | Innehåll | Länk |
+|---|---|---|
+| **v0.6.0 (`latest`)** | Lager 1–3 + **valbar Helhetsbedömning (Lager 4 / Judge)** med `Gemma 4 E2B` i *Klassificera information* | [Hämta senaste (v0.6.0)](https://github.com/mrswedish/Maskera/releases/latest) |
+| **v0.5.0 (Utan Judge)** | Lättviktsversion med enbart Lager 1–3 (~318 MB modeller, utan Lager 4 / Judge-funktionen) | [Hämta v0.5.0 (utan Judge)](https://github.com/mrswedish/Maskera/releases/tag/v0.5.0) |
+
+---
+
 ## Gränssnitt & arbetsflöde
 
 ### 1. Ren startvy före granskning
@@ -65,8 +76,14 @@ I detta läge döljs alla maskeringsverktyg och originaltexten visas **helt omas
    - **GUL — Information som vi behöver vara försiktiga med:** Intern arbetsinformation som inte är avsedd att spridas fritt, men som kan delas med rätt kollegor — t.ex. vanliga APT- och mötesanteckningar, interna arbetsmaterial, utkast till broschyrer (`utkast`, `arbetsmaterial`), intern bemannings- och verksamhetsplanering, interna rutiner, intranätlänkar samt personkopplade arbetskontaktuppgifter.
    - **RÖD — Information som kräver särskilt skydd:** Information som kan orsaka skada för en person, verksamheten eller organisationen om den hamnar i fel händer — patient- och vårduppgifter, skyddade personuppgifter/socialtjänst/lagöverträdelser, sekretessbelagda upphandlingsuppgifter och affärshemligheter, **känsliga personalärenden (HR)** (rehabilitering, varning/disciplinärende, individlön), säkerhetssystem/sårbarheter samt personnummer, SITHS-/kortnummer och kryptonycklar.
 2. **Fråga 2 — Hur får vi hantera informationen?**
-   - Visar pedagogisk vägledning för **Lagring**, **Delning** och **Typexempel** utifrån dokumentets färg, med en tydlig påminnelse om att bedömningen är ett lokalt beslutsstöd som alltid stäms av mot verksamhetens fastställda riktlinjer för informationsklassning.
+   - Visar pedagogisk vägledning för **Lagring**, **Delning** och **Typexempel** utifrån dokumentets färg, med en tydlig påminnelse om att bedömningen är ett lokalt beslutsstöd där det alltid är du som fattar det slutliga beslutet.
    - Nedanför korten visas dokumentets originaltext med eventuella gula och röda avsnitt tydligt utmärkta och förklarade.
+3. **Valbar Helhetsbedömning — Lager 4 (Judge-funktionen med `Gemma 4 E2B`):**
+   - Eftersom **Lager 3** (`EmbeddingGemma 2`) granskar enskilda textstycken och fragment på under 1 sekund kan lösryckta ord (t.ex. i ett kursreferat eller en metodguide) ibland ge ett för högt utslag.
+   - I verktygsraden för **Klassificera information** (och *endast* i denna vy) finns därför det aktiva tillvalet **Helhetsbedömning (Lager 4)**.
+   - Första gången du klickar på knappen visas en informationsruta där du aktivt tar ställning till att ladda ner och aktivera Judge-modellen (`Gemma 4 E2B`, ca **2,62 GB** lagringsutrymme, tar ca **3–8 sekunder extra** per klassificering).
+   - När Lager 4 är aktivt läser modellen dokumentets inledning, rubriker, avslutning och de avsnitt som Lager 3 reagerat på för att bedöma **dokumentets helhet och syfte** samt skriva en kort motivering på svenska. Skarpa strukturfynd från Lager 1 (personnummer, bankkonton, kortnummer och lösenord/nycklar) behåller alltid **vetorätt för RÖD nivå**.
+   - Du kan när som helst slå av Lager 4 i verktygsraden eller klicka **Ta bort Lager 4 (~2,6 GB)** för att radera modellfilen från datorn och frigöra lagringsutrymmet direkt.
 
 ---
 
@@ -139,7 +156,8 @@ Vid **första starten** kontrollerar Maskera om båda AI-modellerna finns lokalt
 
 - **Lager 2 (Svensk BERT NER, ~121 MB):** [`psvensk/bert-base-swedish-cased-ner-onnx`](https://huggingface.co/psvensk/bert-base-swedish-cased-ner-onnx)
 - **Lager 3 (EmbeddingGemma 2, ~197 MB):** [`onnx-community/embeddinggemma-300m-ONNX`](https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX) (`model_q4.onnx`)
-- **Portabel / offline-installation:** Modellerna cachas i användarens lokala appdata-mapp, men kan även läggas i en `models/`-mapp bredvid `Maskera-portabel.exe` eller väljas från valfri mapp/USB-sticka via knappen **Välj lokal modellmapp…** om datorn saknar internetåtkomst.
+- **Lager 4 — Tillval i *Klassificera information* (Gemma 4 E2B Judge, ~2,62 GB):** [`unsloth/gemma-4-E2B-it-qat-GGUF`](https://huggingface.co/unsloth/gemma-4-E2B-it-qat-GGUF) (`gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf`) — laddas **aldrig** ner automatiskt vid start, utan enbart om användaren aktivt bekräftar **Helhetsbedömning (Lager 4)** i vyn *Klassificera information* (och kan tas bort med ett klick i verktygsraden).
+- **Portabel / offline-installation:** Modellerna cachas i användarens lokala appdata-mapp, men kan även läggas i en `models/`-mapp bredvid `Maskera-portabel.exe` (`models/judge/` för Lager 4) eller väljas från valfri mapp/USB-sticka via knappen **Välj lokal modellmapp…** om datorn saknar internetåtkomst.
 
 ---
 

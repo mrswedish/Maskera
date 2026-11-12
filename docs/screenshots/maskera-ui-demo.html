@@ -679,7 +679,20 @@ Vid avstämningen på **[ORGANISATION A]** i **[PLATS A]** kom **[PERSON A]** oc
 
         <span role="separator" aria-orientation="vertical" class="tb-sep"></span>
 
-        <div role="group" aria-label="Klassificering" class="toolbar-group toolbar-group-end">
+        <div role="group" aria-label="Klassificering och helhetsbedömning" class="toolbar-group toolbar-group-end">
+          <button type="button" class="tb-btn judge-toggle-btn" aria-pressed="true">
+            <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z" />
+            </svg>
+            <span>Helhetsbedömning (Lager 4)</span>
+            <span class="judge-state-pill on">Aktiv</span>
+          </button>
+          <button type="button" class="tb-btn judge-remove-toolbar-btn">
+            <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+            </svg>
+            <span>Ta bort Lager 4 (~2,6 GB)</span>
+          </button>
           <button type="button" class="tb-btn-primary">
             <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M14 2v4a2 2 0 0 0 2 2h4" />
@@ -687,7 +700,7 @@ Vid avstämningen på **[ORGANISATION A]** i **[PLATS A]** kom **[PERSON A]** oc
               <path d="m9 18-1.5-1.5" />
               <circle cx="5" cy="14" r="3" />
             </svg>
-            <span>Klassificera (Grön / Gul / Röd)</span>
+            <span>Klassificera + Helhet (Lager 4)</span>
           </button>
         </div>
       </div>
@@ -703,15 +716,30 @@ Vid avstämningen på **[ORGANISATION A]** i **[PLATS A]** kom **[PERSON A]** oc
                 </svg>
                 <span>Förslag: GUL — Intern försiktighet</span>
               </span>
-              <span class="info-scan-meta">3 avsnitt · 312 ms</span>
+              <span class="info-scan-meta">3 avsnitt · 3,4 s (inkl. Lager 4)</span>
             </div>
             <h2 class="info-card-title">1. Vad innehåller informationen?</h2>
           </header>
 
           <div class="info-card-content">
             <p class="info-lead">
-              <strong>Maskinell bedömning: Indikerar GUL (intern) information.</strong> Analysen tyder på internt arbetsmaterial, mötes-/kursanteckningar, utkast eller opublicerade kontaktuppgifter som bör hållas inom behörig krets.
+              <strong>Maskinell bedömning: Indikerar GUL (intern) information.</strong> Helhetsanalysen (Internt APT-utkast) tyder på internt arbetsmaterial, mötes-/kursanteckningar, utkast eller opublicerade kontaktuppgifter för behörig krets.
             </p>
+            <div class="info-judge-box" role="note">
+              <div class="info-judge-header">
+                <span class="info-judge-badge">
+                  <svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z" />
+                  </svg>
+                  <span>Lager 4 · Judge (Helhet)</span>
+                </span>
+                <span class="info-judge-doctype">Internt APT-protokoll / utkast</span>
+                <span class="info-judge-delta confirmed">Bekräftar Gul</span>
+              </div>
+              <p class="info-judge-rationale">
+                Dokumentet i sin helhet utgör minnesanteckningar och bemanningsplanering från ett internt enhetsmöte utan enskilda patient- eller rehabiliteringsärenden.
+              </p>
+            </div>
             <ul class="info-signals-list" role="list">
               <li class="info-signal-item">
                 <span class="sev-pill medium">

@@ -109,6 +109,32 @@ export interface InfoSectionFinding {
   reason: string;
 }
 
+export interface JudgeModelStatus {
+  installed: boolean;
+  loaded: boolean;
+  fileSizeBytes: number;
+  expectedBytes: number;
+  modelName: string;
+}
+
+export interface JudgeDownloadProgress {
+  phase: "downloading" | "loading" | "ready" | "cancelled" | string;
+  label: string;
+  downloadedBytes: number;
+  totalBytes: number;
+}
+
+export interface JudgeAssessment {
+  documentType: string;
+  suggestedLevel: InfoLevel;
+  finalLevel: InfoLevel;
+  layer3Level: InfoLevel;
+  levelAdjusted: boolean;
+  hardVetoApplied: boolean;
+  rationale: string;
+  durationMs: number;
+}
+
 export interface InfoClassificationReport {
   level: InfoLevel;
   badgeTitle: string;
@@ -120,4 +146,5 @@ export interface InfoClassificationReport {
   paragraphsScanned: number;
   scanDurationMs: number;
   semanticAvailable: boolean;
+  judge?: JudgeAssessment | null;
 }
