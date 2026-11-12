@@ -1,0 +1,107 @@
+# Roadmap — Framtida utvecklingssteg för Maskera
+
+Detta dokument samlar arkitekturella vägval, lärdomar och planerade nästa steg för **Maskera** — både för lokal AI-avidentifiering (**Läge 1**) och fristående informationsklassning enligt trafikljusmodellen Grön / Gul / Röd (**Läge 2**).
+
+---
+
+## Grundprinciper som styr vidareutvecklingen
+
+1. **100 % datakontroll (ingen extern molnexponering):** All analys ska köras antingen helt lokalt på medarbetarens dator eller — i ett framtida serverläge — inom organisationens egen kontrollerade infrastruktur.
+2. **Beslutsstöd, aldrig ”automatisk sanning”:** Maskinella bedömningar är ett pedagogiskt stöd som hjälper medarbetaren att stanna upp. Det är alltid människan som väger in dokumentets helhet och verksamhetens styrdokument.
+3. **Modulär separation mellan Läge 1 och Läge 2:** Avidentifiering för AI och informationsklassning (Grön / Gul / Röd) hålls fortsatt separerade i kod och gränssnitt så att de vid behov kan drivas som två skilda produkter eller tjänster.
+
+---
+
+## Spår 1: Identifiering av yrkestitlar, roller och kvasidentifierare (Lager 1 & 2)
+
+### Bakgrund & nuläge
+Nuvarande språkmodell i Lager 2 (`KBLab/bert-base-swedish-cased-ner`, tränad på *SUC 3.0*) är byggd för att hitta **egennamn** (`Person`, `Organisation`, `Plats`, `Tid`, `Händelse`). Eftersom yrkestitlar och befattningar (*verksamhetschef*, *läkare*, *miljösamordnare*, *rektor*) rent språkligt är allmänna substantiv klassas de idag som vanlig text (`O`).
+
+I kommunal och regional verksamhet fungerar dock smala befattningar ofta som **indirekta identifierare (kvasidentifierare)**: det finns många *läkare*, men ofta bara en enda *miljösamordnare* eller *verksamhetschef* på en specifik enhet (`[ORGANISATION A]`). Samtidigt vill användaren ibland *behålla* generella yrkesord för att en AI-tjänst ska förstå sammanhanget.
+
+### Möjliga genomförandesteg
+
+- **Steg 1A — Svensk sammansättnings- och ordlistemotor i Lager 1 (Snabbvinst, 0 MB extra, < 1 ms):**
+  - Utnyttja svenskans regelbundna ordbildning genom att matcha vanliga befattningsefterled (`-chef`, `-samordnare`, `-läkare`, `-sköterska`, `-handläggare`, `-direktör`, `-rektor`, `-kurator`, `-psykolog`, `-sekreterare`, `-ansvarig`, `-ledare` m.fl. i obestämd/bestämd form) kombinerat med en kurerad lista på grundyrken (*läkare*, *jurist*, *ekonom* m.fl.).
+  - Fångar automatiskt även nya sammansättningar (t.ex. *informationssäkerhetssamordnare* eller *biträdande verksamhetschef*) och exponeras som en valbar filterknapp i verktygsraden (`Roll/Titel` → `[ROLL A]`), exempelvis aktiv i profilen **Strikt**.
+- **Steg 1B — Finjusterad svensk NER-modell med egen `TITEL/ROLL`-klass:**
+  - Finjustera grundmodellen `KB/bert-base-swedish-cased` på svensk korpus med uppmärkta yrkesroller/titlar (t.ex. *Swe-NERC* kombinerat med syntetiska exempel från vård, skola, kollektivtrafik och förvaltning) och exportera till kvantiserad INT8 ONNX (~121 MB).
+  - Ger full meningskontext utan att öka modellstorleken eller sänka hastigheten jämfört med dagens Lager 2.
+  - *Alternativt spår att bevaka:* Zero-shot NER-modeller i ONNX (t.ex. *GLiNER*) där etiketter kan anges dynamiskt utan omträning.
+
+---
+
+## Spår 2: ”Lager 4” — Helhetstolkning med lokal lättvikts-LLM (`Gemma 4 E2B`)
+
+### Vilken begränsning i Lager 3 löser Lager 4?
+Lager 3 (`EmbeddingGemma 2`) är en inbäddningsmodell (*bi-encoder*) som omvandlar enskilda textavsnitt till 768-dimensionella vektorer och mäter **ämnes- och vokabulärlikhet** — den ”resonerar” inte över hela dokumentet.
+- Ett dokument som beskriver *hur man generellt håller svåra samtal eller förhandlingar* (t.ex. ett kurs- eller seminariereferat) innehåller nästan samma ord som ett *faktiskt personal- eller upphandlingsärende*.
+- En kompakt generativ språkmodell med *cross-attention* kan däremot hålla hela dokumentets ramverk i minnet och skilja på **omnämnande/metodbeskrivning** och **faktiskt skyddsvärt ärende**.
+
+### Varför `Gemma 4 E2B` (mobil/text-varianten) är en stark kandidat
+- **Byggd för lokal kantkörning (Edge):** Effektiv 2B-arkitektur med *Per-Layer Embeddings (PLE)* och upp till **128k tokens** kontextfönster.
+- **Hanterbar fotavtrycksstorlek:** Googles *Mobile Text-Only*-kvantisering ligger på ca **0,84 GB** (`.litertlm`) och 4-bitars `GGUF` kring **1,2–1,5 GB**, med ca 1,5–2,5 GB RAM vid körning — fullt körbart på vanliga kontorsdatorer (16 GB RAM) utan dedikerat grafikkort.
+- **Rätt svårighetsgrad på uppgiften:** Lager 4 behöver inte skriva långa fria texter, utan enbart göra en **avgränsad kontextuell rimlighetsbedömning** utifrån tydliga trafikljuskriterier.
+
+### Föreslagen ”Tratt-arkitektur” (Cascade) för hög hastighet på CPU
+För att undvika 10–20 sekunders väntetid på långa Word- och PDF-dokument ska Lager 4 **inte** ersätta Lager 1–3, utan fungera som en **överprövare (”domare”)** ovanpå dem:
+
+```
+Dokument in
+  ├── Lager 1 (Regex, < 1 ms)      ──► Hårda identifierare (Personnr, Bankkonto, Kort, Nycklar)
+  ├── Lager 2 (BERT NER, ~50 ms)   ──► Namngivna entiteter (Person, Organisation, Plats...)
+  ├── Lager 3 (EmbeddingGemma 2)   ──► Snabb grovscanning av alla avsnitt (< 0,5 s)
+  │                                      │
+  │     Komprimerat beslutsunderlag (~500–1 200 tokens):
+  │     • Dokumentets titel, inledning & avslutning (syfte/dokumenttyp)
+  │     • Sammanfattning av fynd från Lager 1 & 2
+  │     • Endast de avsnitt som Lager 3 flaggat som Gula eller Röda
+  ▼
+  └── Lager 4 (Gemma 4 E2B)        ──► Helhetsbedömning i låst JSON-format (~60–80 ut-tokens)
+                                       (~1,5–3 s på vanlig kontorsprocessor)
+```
+
+**Exempel på strukturerat svar från Lager 4 (`temperature = 0.0`, låst JSON-schema):**
+- Identifierad dokumenttyp (t.ex. *Kursreferat*, *APT-anteckning*, *Utkast till broschyr*, *Enskilt HR-/rehabärende*).
+- Helhetsbedömd nivå (`green` / `yellow` / `red`) och eventuell omklassning av lösryckta stycketräffar från Lager 3.
+- Kort, begriplig motivering på svenska (1–2 meningar) som förklarar *varför* dokumentet i sin helhet bedöms som Grönt, Gult eller Rött.
+
+### Tekniska vägval och skyddsräcken för Lager 4
+1. **Säkerhetsprincip — ”Lager 1 har alltid vetorätt”:**
+   Lager 4 får **aldrig** nedgradera bekräftade strukturfynd från Lager 1 (t.ex. giltiga personnummer, personliga bankkontonummer, SITHS-/kortnummer eller lösenord/API-nycklar). Lager 4 får enbart nyansera och överpröva *semantiska* gråzoner från Lager 3.
+2. **Val av lokal inferensmotor (Runtime):**
+   Idag kör Lager 2 och 3 på statiskt länkad Microsoft ONNX Runtime (`ort`). För Gemma 4 E2B utvärderas två huvudspår för Windows/macOS:
+   - **LiteRT-LM (`.litertlm` med XNNPACK):** Googles egen edge-motor som har direkt stöd för 0,84 GB mobil/text-kvantiseringen och PLE-arkitekturen.
+   - **`llama.cpp` / `GGUF` (t.ex. via `llama-cpp-2` i Rust):** Mogen paketering för Windows CPU (AVX2) och integrerade kretsar (Vulkan).
+3. **Stegvis/valbar modellhämtning:**
+   För att hålla basinstallationen snabb (~318 MB) kan Lager 4 antingen hämtas vid behov som *”Fördjupad helhetsanalys”* eller förpackas färdigt i en intern organisationsdistribution (`models/`).
+
+---
+
+## Spår 3: Verksamhetsanpassning & Framtida serverarkitektur
+
+### 1. Extern, signerad JSON-profil för klassningsexempel
+- Lyft ut referensankare (`INFO_GROUPS`, `INFO_GREEN_PROMPTS`) och hanteringsvägledningar (lagringsytor som Teams, OneDrive, SharePoint, diarium och verksamhetssystem) ur Rust-koden till en **versionshanterad JSON-konfigurationsfil**.
+- Gör det möjligt för informationssäkerhetssamordnare och superanvändare att löpande ”träna”/kalibrera Lager 3 med nya verksamhetsnära exempel från vård, skola, administration och kollektivtrafik utan ny programrelease.
+
+### 2. Samma 4-lagersarkitektur lokalt och som central servertjänst
+Eftersom klassificeringsmotorn (`src-tauri/src/info_classification.rs`) är frikopplad från maskeringsflödet med ett rent JSON-kontrakt (`InfoClassificationReport`) kan arkitekturen växa i två kompatibla spår:
+
+| Egenskap | Lokalt skrivbordsläge (`Maskera-portabel.exe`) | Framtida intern servertjänst (On-prem / Intranät) |
+|---|---|---|
+| **Målgrupp / Användning** | Fristående på medarbetarens PC (även offline) | Centralt beslutsstöd via webbgränssnitt, intranät eller Office/SharePoint-tillägg |
+| **Lager 1–3** | Regex + Svensk BERT + `EmbeddingGemma 2` lokalt | Exakt samma Rust-motor på intern server |
+| **Lager 4 (Helhetstolkning)** | Lättviktsmodell: **`Gemma 4 E2B`** (~0,84–1,3 GB) på CPU | Större syskonmodell på intern GPU-server: **`Gemma 4 E4B`** eller **`Gemma 4 26B-A4B (MoE)`** |
+| **Klientnedladdning** | ~0,3 GB (Lager 1–3) + ev. ~0,84 GB (Lager 4) | **0 MB** på klientdatorn |
+| **Styrning av regler & MDAP-stöd** | Lokal/distribuerad JSON-profil | Centralt uppdaterad i realtid för hela organisationen |
+
+---
+
+## Föreslagen etappindelning
+
+| Etapp | Fokusområde | Insats | Effekt |
+|---|---|---|---|
+| **Etapp 1** | **Externa klassningsprofiler (JSON):** Konfigurerbara gröna/gula/röda typexempel och lagringsanvisningar utan omkompilering | Låg | Superanvändare/infosäk kan kalibrera exempel löpande |
+| **Etapp 2** | **Titlar & roller (Steg 1A):** Svensk sammansättnings- och ordlistemotor i Lager 1 + valbart filter `Roll/Titel` (`[ROLL A]`) | Låg–Medel | Skyddar mot bakvägsidentifiering via unika befattningar (0 MB extra) |
+| **Etapp 3** | **Lager 4 PoC (`Gemma 4 E2B`):** Fristående prototyp/benchmark av `LiteRT-LM` vs. `GGUF` på kontors-CPU med tratt-arkitektur och låst JSON | Medel | Löser kontextfällan i Lager 3 (skiljer metod/utbildning från skarpt ärende) |
+| **Etapp 4** | **Finjusterad BERT (`Steg 1B`) & ev. Server-API:** Kontexthantering av roller i Lager 2 samt möjlighet att köra `info_classification` som central intern mikrotjänst | Medel–Hög | Skalbar organisationslösning med noll klientunderhåll för klassificering |
