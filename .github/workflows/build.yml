@@ -10,11 +10,79 @@ permissions:
   contents: write
 
 jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read version from package.json
+        id: meta
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Recreate latest release & ensure versioned release exists
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ steps.meta.outputs.version }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          sleep 2
+
+          cat <<EOF > release_notes.md
+          ## Nedladdning (v${VER})
+
+          ### Windows (64-bit)
+          | Fil | Beskrivning |
+          |---|---|
+          | \`Maskera-portabel.exe\` | **Portabel** — kör direkt utan installation |
+          | \`maskera_${VER}_x64-setup.exe\` | Installerare — installerar i Start-menyn |
+
+          ### macOS (Apple Silicon — M1/M2/M3/M4)
+          | Fil | Beskrivning |
+          |---|---|
+          | \`Maskera_${VER}_aarch64.dmg\` | **Skivavbild (.dmg)** — dra Maskera till Program (*Applications*) |
+          | \`Maskera_${VER}_macOS_arm64.app.zip\` | Komprimerat \`.app\`-paket |
+
+          > **Tips vid första start på macOS:** Eftersom appen inte är Apple-notariserad kan Gatekeeper visa en varning första gången. Högerklicka på appen → **Öppna** (eller godkänn under *Systeminställningar → Integritet och säkerhet → Öppna ändå*, alternativt kör \`xattr -cr /Applications/maskera.app\` i Terminal).
+
+          ### Nytt i v${VER}
+          - **macOS-version med Apple Metal-acceleration:** Byggs nu både för Windows och macOS (Apple Silicon), där Lager 4 (\`Gemma 4 E2B\` Judge) utnyttjar inbyggd Metal-GPU på Mac.
+          - **Maskering av yrkestitlar och roller (\`+ Roll/Titel\` → \`[ROLL A]\`):** Svensk sammansättnings- och ordlistemotor i Lager 1 (\`0 MB\`, \`< 1 ms\`) i *Avidentifiera för AI*.
+          - **Skärpt \`Konto/Giro\`-validering (Luhn Modulus 10):** Förhindrar falska träffar på intervall som \`1-3 år\` eller \`2020-2024\`.
+
+          ### Tidigare version utan Lager 4 (Judge)
+          - **[Maskera v0.5.0 — Lager 1–3 (utan Judge-funktionen)](https://github.com/mrswedish/Maskera/releases/tag/v0.5.0)** finns permanent sparad under Releases.
+          EOF
+
+          # Skapa eller uppdatera "latest"
+          gh release create latest \
+            --target "$GITHUB_SHA" \
+            --title "Maskera v${VER} — Latest Build (Windows & macOS)" \
+            --notes-file release_notes.md \
+            --latest
+
+          # Skapa versionslås vX.Y.Z om den inte redan finns (rör aldrig äldre releaser som v0.5.0)
+          if ! gh release view "v${VER}" > /dev/null 2>&1; then
+            gh release create "v${VER}" \
+              --target "$GITHUB_SHA" \
+              --title "Maskera v${VER} — Windows & macOS" \
+              --notes-file release_notes.md \
+              --latest=false
+          else
+            gh release edit "v${VER}" \
+              --title "Maskera v${VER} — Windows & macOS" \
+              --notes-file release_notes.md
+          fi
+
   build-windows:
+    needs: prepare-release
     runs-on: windows-latest
     env:
       LIBCLANG_PATH: "C:\\Program Files\\LLVM\\bin"
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -30,52 +98,60 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
-      - name: Delete existing latest release (preserves versioned releases like v0.5.0)
-        run: gh release delete latest --yes --cleanup-tag
-        continue-on-error: true
+      - name: Build Windows Tauri app
+        run: npx tauri build
+
+      - name: Upload Windows artifacts to latest & v${{ needs.prepare-release.outputs.version }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
-        with:
-          tagName: latest
-          releaseName: "Maskera v0.6.3 — Latest Build (Roll/Titel-maskering & skärpt Konto/Giro)"
-          releaseBody: |
-            ## Nedladdning (v0.6.3)
-
-            | Fil | Beskrivning |
-            |---|---|
-            | `Maskera-portabel.exe` | **Portabel** — kör direkt utan installation |
-            | `Maskera_0.6.3_x64-setup.exe` | Installerare — installerar i Start-menyn |
-
-            ### Nytt i v0.6.3
-            - **Maskering av yrkestitlar och roller (`+ Roll/Titel` → `[ROLL A]`):** Ny svensk sammansättnings- och ordlistemotor i Lager 1 (`0 MB`, `< 1 ms`) i *Avidentifiera för AI* som fångar befattningar och kvasidentifierare (t.ex. *biträdande verksamhetschef*, *informationssäkerhetssamordnaren*, *vård- och omsorgschefen*, *medicinskt ansvarig sjuksköterska*) utan att överlarma på falska vänner (*samtalstekniker*, *offentliga sektorn*, *skyddsvärda*, *personuppgiftsansvarig* m.fl.).
-            - **Skärpt `Konto/Giro`-validering (Luhn Modulus 10):** Eliminering av falska träffar på siffer- och årtalsintervall som `1-3 år`, `2-6 månader` eller `2020-2024`, samtidigt som Bankgiro, PlusGiro, clearing+bankkonto och mellanslagsgrupperade IBAN fångas upp.
-
-            ### Tidigare version utan Lager 4 (Judge)
-            - **[Maskera v0.5.0 — Lager 1–3 (utan Judge-funktionen)](https://github.com/mrswedish/Maskera/releases/tag/v0.5.0)** finns permanent sparad under Releases.
-          releaseDraft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload portable EXE & publish versioned v0.6.3 release
+          VER: ${{ needs.prepare-release.outputs.version }}
         run: |
           Copy-Item "src-tauri/target/release/maskera.exe" "Maskera-portabel.exe"
-          gh release upload latest "Maskera-portabel.exe" --clobber
-
           $setupExe = Get-ChildItem -Path "src-tauri/target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
           $msiFile  = Get-ChildItem -Path "src-tauri/target/release/bundle/msi/*.msi" | Select-Object -First 1
 
-          gh release view v0.6.3 > $null 2>&1
-          if ($LASTEXITCODE -ne 0) {
-            gh release create v0.6.3 "Maskera-portabel.exe" $setupExe.FullName $msiFile.FullName `
-              --title "Maskera v0.6.3 — Roll/Titel-maskering & skärpt Konto/Giro" `
-              --notes "Version 0.6.3 lägger till valbar maskering av yrkestitlar och befattningar (`+ Roll/Titel` → `[ROLL A]`, Steg 1A) i *Avidentifiera för AI* samt Luhn- och intervallvalidering för `Konto/Giro` (förhindrar falska träffar som `1-3 år`). Föregående version utan Judge finns kvar här: [v0.5.0](https://github.com/mrswedish/Maskera/releases/tag/v0.5.0)." `
-              --latest=false
-          } else {
-            gh release upload v0.6.3 "Maskera-portabel.exe" $setupExe.FullName $msiFile.FullName --clobber
-          }
+          gh release upload latest "Maskera-portabel.exe" $setupExe.FullName $msiFile.FullName --clobber
+          gh release upload "v$VER" "Maskera-portabel.exe" $setupExe.FullName $msiFile.FullName --clobber
+
+  build-macos:
+    needs: prepare-release
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Build macOS Tauri app (Apple Silicon + ad-hoc sign)
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
+        run: npx tauri build --target aarch64-apple-darwin --bundles app,dmg
+
+      - name: Package & upload macOS artifacts to latest & v${{ needs.prepare-release.outputs.version }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          BUNDLE_DIR="src-tauri/target/aarch64-apple-darwin/release/bundle"
+          DMG_SRC=$(ls "$BUNDLE_DIR"/dmg/*.dmg | head -n 1)
+          DMG_OUT="Maskera_${VER}_aarch64.dmg"
+          cp "$DMG_SRC" "$DMG_OUT"
+
+          APP_DIR="$BUNDLE_DIR/macos"
+          APP_NAME=$(ls "$APP_DIR" | grep '\.app$' | head -n 1)
+          codesign --force --deep --sign - "$APP_DIR/$APP_NAME"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_DIR/$APP_NAME" "Maskera_${VER}_macOS_arm64.app.zip"
+
+          gh release upload latest "$DMG_OUT" "Maskera_${VER}_macOS_arm64.app.zip" --clobber
+          gh release upload "v$VER" "$DMG_OUT" "Maskera_${VER}_macOS_arm64.app.zip" --clobber
