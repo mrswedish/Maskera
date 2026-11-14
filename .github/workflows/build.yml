@@ -111,7 +111,7 @@ jobs:
           $msiFile  = Get-ChildItem -Path "src-tauri/target/release/bundle/msi/*.msi" | Select-Object -First 1
 
           gh release upload latest "Maskera-portabel.exe" $setupExe.FullName $msiFile.FullName --clobber
-          gh release upload "v$VER" "Maskera-portabel.exe" $setupExe.FullName $msiFile.FullName --clobber
+          gh release upload "v$env:VER" "Maskera-portabel.exe" $setupExe.FullName $msiFile.FullName --clobber
 
   build-macos:
     needs: prepare-release
@@ -136,6 +136,7 @@ jobs:
       - name: Build macOS Tauri app (Apple Silicon + ad-hoc sign)
         env:
           APPLE_SIGNING_IDENTITY: "-"
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: npx tauri build --target aarch64-apple-darwin --bundles app,dmg
 
       - name: Package & upload macOS artifacts to latest & v${{ needs.prepare-release.outputs.version }}
