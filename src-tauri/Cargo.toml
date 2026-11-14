@@ -8,11 +8,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
-# The `_lib` suffix may seem redundant but it is necessary
-# to make the lib name unique and wouldn't conflict with the bin name.
-# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "maskera_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -42,6 +39,10 @@ llama-cpp-2 = { version = "0.1.161", default-features = false, features = ["samp
 [target.'cfg(target_os = "macos")'.dependencies]
 llama-cpp-2 = { version = "0.1.161", default-features = false, features = ["metal", "sampler"] }
 
-# ── Dev-profil: optimera dependencies med O3 även i debug-bygget ──────────────
+# ── Dev-profil: optimera dependencies med O3 och skippa tunga DWARF-symboler ──
+[profile.dev]
+debug = 1
+
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
