@@ -131,6 +131,7 @@ const NEUTRAL_PROMPTS: &[&str] = &[
     "Minnesanteckningar från arbetsplatsträff, mötesprotokoll, dagordning, enhet, datum och tid, plats, närvarande medarbetare, mötesledare och sekreterare.",
     "Allmänt verksamhetsläge och bemanning inför jul, nyår och semester, beläggning i telefonrådgivning, tillgänglighetsmål, täckning av sjuksköterskepass och läkarpass samt julschema och hyrpersonal.",
     "Allmänna mötespunkter på vårdcentral, skola, kommun eller kontor om schemaläggning, lokaler, trivsel, allmänna rutiner och planering utan enskilda patientuppgifter eller säkerhetssårbarheter.",
+    "Övriga frågor på APT eller personalmöte, påminnelse om att besvara årets medarbetarenkät eller pulsmätning, nuvarande svarsfrekvens på enheten, skyddsrond och allmän ekonomisk uppföljning.",
     "Viktig information: Detta e-postmeddelande kommer från en extern avsändare utanför organisationen. Klicka aldrig på länkar och öppna aldrig bifogade filer om du är osäker på avsändaren eller innehållet. Vid misstanke om skadligt mejl eller nätfiske, vidarebefordra meddelandet.",
     "Automatisk e-postfotnot, signatur eller konfidentialitetsnotis längst ned i ett vanligt e-postmeddelande i Outlook eller Teams.",
 ];
@@ -351,9 +352,12 @@ impl EmbeddingClassifier {
         }
         let total_paras = paragraphs.len();
 
+        // Bädda in den naturliga källtexten (orig_slice) så att syntetiska platshållare som
+        // [TID G], [ÖVRIGT D] eller [ROLL A] i Strikt-läget aldrig förvränger meningsvektorn,
+        // men bygg alltid UI-förhandsvisningen (preview) från masked_slice.
         let cleaned_queries: Vec<String> = paragraphs
             .iter()
-            .map(|(_, _, slice)| clean_for_embedding(slice))
+            .map(|(_, _, orig_slice, _)| clean_for_embedding(orig_slice))
             .collect();
         let formatted: Vec<String> = cleaned_queries
             .iter()
@@ -365,7 +369,7 @@ impl EmbeddingClassifier {
         };
 
         let mut findings = Vec::new();
-        for (((p_idx, (byte_start, byte_end, slice)), clean), vec) in paragraphs
+        for (((p_idx, (byte_start, byte_end, orig_slice, masked_slice)), clean), vec) in paragraphs
             .into_iter()
             .enumerate()
             .zip(cleaned_queries.iter())
@@ -373,7 +377,7 @@ impl EmbeddingClassifier {
         {
             // Fristående rubriker (t.ex. "**MINNESANTECKNINGAR – ARBETSPLATSTRÄFF (APT)**"
             // eller "## 1. Verksamhetsläge") saknar brödtext och ska inte ensamflaggas.
-            if is_standalone_heading(slice, clean) {
+            if is_standalone_heading(orig_slice, clean) {
                 continue;
             }
 
@@ -398,9 +402,9 @@ impl EmbeddingClassifier {
                 // medan genuint känsliga stycken ligger på ~0.032..0.19+
                 if best_sim >= 0.76 && margin >= 0.032 {
                     let grp = &PROTOTYPE_GROUPS[g_idx];
-                    let clean_line = clean.replace('\n', " ");
-                    let preview: String = clean_line.chars().take(135).collect();
-                    let preview = if clean_line.chars().count() > 135 {
+                    let clean_masked = clean_for_embedding(masked_slice).replace('\n', " ");
+                    let preview: String = clean_masked.chars().take(135).collect();
+                    let preview = if clean_masked.chars().count() > 135 {
                         format!("{}…", preview.trim_end())
                     } else {
                         preview
@@ -525,17 +529,20 @@ fn trimmed_span(full: &str, start: usize, end: usize) -> Option<(usize, usize)> 
     Some((p_start, p_end))
 }
 
-/// Delar upp `masked_text` i avsnitt för EmbeddingGemma 2 samtidigt som varje avsnitts
-/// exakta byte-intervall `(orig_start, orig_end)` i `original_text` bevaras för UI-markering.
+/// Delar upp texten i avsnitt med stabila styckegränser baserade på `original_text`,
+/// och returnerar `(orig_start, orig_end, orig_slice, masked_slice)`.
 fn split_paragraphs_paired<'a>(
     original_text: &'a str,
     masked_text: &'a str,
-) -> Vec<(usize, usize, &'a str)> {
+) -> Vec<(usize, usize, &'a str, &'a str)> {
     let orig_blocks = raw_double_newline_blocks(original_text);
     let mask_blocks = raw_double_newline_blocks(masked_text);
 
     if original_text.is_empty() || orig_blocks.len() != mask_blocks.len() {
-        return split_paragraphs(masked_text);
+        return split_paragraphs(masked_text)
+            .into_iter()
+            .map(|(s, e, sl)| (s, e, sl, sl))
+            .collect();
     }
 
     let mut raw_paired: Vec<(usize, usize, usize, usize)> = Vec::new();
@@ -547,7 +554,7 @@ fn split_paragraphs_paired<'a>(
         {
             continue;
         }
-        if m_trimmed.chars().count() <= MAX_PARAGRAPH_CHARS {
+        if o_trimmed.chars().count() <= MAX_PARAGRAPH_CHARS {
             raw_paired.push((o_start, o_end, m_start, m_end));
         } else {
             // Vid mycket långa stycken delas de upp längs meningsgränser
@@ -565,9 +572,9 @@ fn split_paragraphs_paired<'a>(
 
     let mut merged: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(raw_paired.len());
     for (o_start, o_end, m_start, m_end) in raw_paired {
-        if let Some((_, prev_o_end, prev_m_start, prev_m_end)) = merged.last_mut() {
-            let prev_chars = masked_text[*prev_m_start..*prev_m_end].chars().count();
-            let curr_chars = masked_text[m_start..m_end].chars().count();
+        if let Some((prev_o_start, prev_o_end, _, prev_m_end)) = merged.last_mut() {
+            let prev_chars = original_text[*prev_o_start..*prev_o_end].chars().count();
+            let curr_chars = original_text[o_start..o_end].chars().count();
             if (prev_chars < 140 || curr_chars < 95)
                 && (prev_chars + curr_chars <= MERGE_TARGET_CHARS)
             {
@@ -582,7 +589,12 @@ fn split_paragraphs_paired<'a>(
     merged
         .into_iter()
         .map(|(o_start, o_end, m_start, m_end)| {
-            (o_start, o_end, masked_text[m_start..m_end].trim())
+            (
+                o_start,
+                o_end,
+                original_text[o_start..o_end].trim(),
+                masked_text[m_start..m_end].trim(),
+            )
         })
         .collect()
 }
@@ -996,6 +1008,35 @@ Om du misstänker att meddelandet är skadligt, vidarebefordra meddelandet till 
             banner_findings.len(),
             0,
             "Automatisk varningsfot för extern e-post ska inte falskflaggas som IT-sårbarhet!"
+        );
+
+        // Punkt 5–6 i APT-protokoll (skyddsrond + medarbetarenkät) ska ge 0 semantiska larm i Läge 1
+        // både i AI-säker och när Strikt maskerar tider/roller ([TID G], [ÖVRIGT E], [ROLL A]):
+        let apt_survey_orig = "\
+5. Arbetsmiljö och skyddsrond\n\n\
+Skyddsombud Sara Nilsson redovisade utfallet från höstens skyddsrond:\n\n\
+Belysningen i dikteringsrum 2 åtgärdas av vaktmästare under nästa vecka.\n\n\
+Hög arbetsbelastning i receptionen mellan kl. 08:00 och 09:30 lyftes. Vi testar under tre veckor att omfördela en undersköterska till incheckningen under morgontoppen. Utvärdering sker på nästa APT den 9 december.\n\n\
+6. Övriga frågor\n\n\
+Årets medarbetarenkät stänger på tisdag den 17 november – nuvarande svarsfrekvens på enheten är 74 procent. Avsätt 15 minuter under morgondagens administrativa tid om du ännu inte har svarat.";
+
+        let apt_survey_strict_masked = "\
+5. Arbetsmiljö och skyddsrond\n\n\
+[ROLL A] [PERSON A] redovisade utfallet från höstens skyddsrond:\n\n\
+Belysningen i dikteringsrum 2 åtgärdas av [ROLL B] under [TID A].\n\n\
+Hög arbetsbelastning i receptionen mellan [TID B] och [TID C] lyftes. Vi testar under [TID D] att omfördela en [ROLL C] till incheckningen under morgontoppen. Utvärdering sker på nästa APT [TID E].\n\n\
+6. Övriga frågor\n\n\
+Årets medarbetarenkät stänger på [TID F] – nuvarande svarsfrekvens på enheten är [ÖVRIGT A]. Avsätt [TID G] under morgondagens administrativa tid om du ännu inte har svarat.";
+
+        let (survey_findings, _) = clf.scan_paragraphs_with_progress(
+            apt_survey_orig,
+            apt_survey_strict_masked,
+            |_, _| {},
+        );
+        assert!(
+            survey_findings.is_empty(),
+            "Medarbetarenkät på APT ska ge 0 semantiska varningar även vid Strikt maskering, fick: {:?}",
+            survey_findings
         );
     }
 }

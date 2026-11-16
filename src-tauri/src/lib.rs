@@ -23,6 +23,47 @@ static TOKENIZER: OnceLock<Tokenizer> = OnceLock::new();
 static CLASSIFIER: OnceLock<EmbeddingClassifier> = OnceLock::new();
 static JUDGE_ENGINE: Mutex<Option<info_judge::JudgeEngine>> = Mutex::new(None);
 static JUDGE_CANCEL: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static JUDGE_ATEXIT_REGISTERED: AtomicBool = AtomicBool::new(false);
+
+/// Frigör Lager 4-motorn (`LlamaContext` + `LlamaModel`) explicit innan processen avslutas.
+/// På macOS med Metal kräver `ggml_metal_rsets_free` i C++ `atexit`-destruktorn att alla
+/// GPU-residency-sets redan är avallokerade innan `std::process::exit` kör C++-destruktorerna.
+fn shutdown_judge_engine() {
+    if let Ok(mut guard) = JUDGE_ENGINE.lock() {
+        *guard = None;
+    }
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn atexit_drop_judge_engine() {
+    if let Ok(mut guard) = JUDGE_ENGINE.try_lock() {
+        *guard = None;
+    }
+}
+
+fn load_and_store_judge_engine(
+    guard: &mut Option<info_judge::JudgeEngine>,
+    path: &Path,
+) -> Result<(), String> {
+    let engine = info_judge::JudgeEngine::load(path)?;
+    *guard = Some(engine);
+
+    // Registrera en C `atexit`-hook EFTER att `ggml_metal_device` skapats av `JudgeEngine::load`.
+    // Eftersom `atexit` körs i omvänd ordning (LIFO) garanterar detta att `JUDGE_ENGINE` alltid
+    // frigörs FÖRE `ggml_metal_device_free` även om `std::process::exit` anropas direkt.
+    #[cfg(target_os = "macos")]
+    if !JUDGE_ATEXIT_REGISTERED.swap(true, Ordering::SeqCst) {
+        extern "C" {
+            fn atexit(cb: extern "C" fn()) -> std::ffi::c_int;
+        }
+        unsafe {
+            let _ = atexit(atexit_drop_judge_engine);
+        }
+    }
+
+    Ok(())
+}
 
 /// Filer för KBLab BERT NER (med ungefärlig storlek i byte för jämn total-progressbar)
 const MODEL_FILES: &[(&str, &str, u64)] = &[
@@ -1577,7 +1618,7 @@ async fn ensure_judge_loaded(app: AppHandle) -> Result<info_judge::JudgeModelSta
             .lock()
             .map_err(|e| format!("Låsfel för Lager 4: {e}"))?;
         if guard.is_none() {
-            *guard = Some(info_judge::JudgeEngine::load(&path)?);
+            load_and_store_judge_engine(&mut guard, &path)?;
         }
         Ok(())
     })
@@ -1885,7 +1926,7 @@ async fn classify_information_document(
                     let path = resolve_existing_judge_file(&app).ok_or_else(|| {
                         "Lager 4-modellen (Gemma 4 E2B) är inte installerad ännu. Aktivera och ladda ner den via knappen Helhetsbedömning (Lager 4).".to_string()
                     })?;
-                    *guard = Some(info_judge::JudgeEngine::load(&path)?);
+                    load_and_store_judge_engine(&mut guard, &path)?;
                 }
 
                 if let Some(engine) = guard.as_mut() {
@@ -1933,8 +1974,21 @@ pub fn run() {
             export_masked_docx,
             export_masked_xlsx
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. }
+                    | tauri::RunEvent::Exit
+                    | tauri::RunEvent::WindowEvent {
+                        event: tauri::WindowEvent::Destroyed,
+                        ..
+                    }
+            ) {
+                shutdown_judge_engine();
+            }
+        });
 }
 
 #[cfg(test)]
@@ -2087,6 +2141,41 @@ mod tests {
                 "8327-9, 123 456 789-0",
                 "SE45 5000 0000 0583 9825 7466",
             ]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn judge_metal_exit_does_not_abort() {
+        let Ok(home) = std::env::var("HOME") else {
+            return;
+        };
+        let gguf = Path::new(&home)
+            .join("Library/Application Support/com.patriksvensk.maskera/models/judge")
+            .join(info_judge::JUDGE_FILENAME);
+        if !gguf.exists() {
+            return;
+        }
+
+        if std::env::var("MASKERA_SUBPROC_METAL_EXIT").as_deref() == Ok("1") {
+            let mut guard = JUDGE_ENGINE.lock().unwrap();
+            load_and_store_judge_engine(&mut guard, &gguf).expect("load Judge on Metal");
+            drop(guard);
+            // Simulera exakt vad tao::EventLoop::run gör vid avslut om statics ligger kvar
+            std::process::exit(0);
+        }
+
+        let current_exe = std::env::current_exe().expect("test binary path");
+        let status = std::process::Command::new(current_exe)
+            .env("MASKERA_SUBPROC_METAL_EXIT", "1")
+            .arg("--exact")
+            .arg("tests::judge_metal_exit_does_not_abort")
+            .arg("--nocapture")
+            .status()
+            .expect("spawn child process");
+        assert!(
+            status.success(),
+            "Processavslut med laddad Metal-modell kraschade (status: {status})"
         );
     }
 }

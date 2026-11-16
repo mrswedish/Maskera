@@ -50,9 +50,9 @@ jobs:
           > **Tips vid första start på macOS:** Eftersom appen inte är Apple-notariserad kan Gatekeeper visa en varning första gången. Högerklicka på appen → **Öppna** (eller godkänn under *Systeminställningar → Integritet och säkerhet → Öppna ändå*, alternativt kör \`xattr -cr /Applications/maskera.app\` i Terminal).
 
           ### Nytt i v${VER}
-          - **macOS-version med Apple Metal-acceleration:** Byggs nu både för Windows och macOS (Apple Silicon), där Lager 4 (\`Gemma 4 E2B\` Judge) utnyttjar inbyggd Metal-GPU på Mac.
-          - **Maskering av yrkestitlar och roller (\`+ Roll/Titel\` → \`[ROLL A]\`):** Svensk sammansättnings- och ordlistemotor i Lager 1 (\`0 MB\`, \`< 1 ms\`) i *Avidentifiera för AI*.
-          - **Skärpt \`Konto/Giro\`-validering (Luhn Modulus 10):** Förhindrar falska träffar på intervall som \`1-3 år\` eller \`2020-2024\`.
+          - **Ren Metal-nedstängning på macOS:** Frigör nu Lager 4:s GPU-residency-sets explicit före processavslut så att appen aldrig utlöser \`ggml_metal_rsets_free\`-abort vid stängning på Apple Silicon.
+          - **Skärpt APT- & enkätkalibrering (Läge 1 & Läge 2):** Skiljer tydligt på enhetsövergripande *medarbetarenkäter* och individuella *medarbetarsamtal*, samt utgår från källtextens meningsstruktur vid inbäddning i Läge 1 så att **Strikt** maskering (\`[TID]\`/\`[ROLL]\`) inte skapar falska gränsfallslarm.
+          - **Snabbare & smalare byggprofil:** Endast desktop-\`rlib\` byggs (tar bort oanvänd mobil-\`staticlib\`/\`cdylib\`).
 
           ### Tidigare version utan Lager 4 (Judge)
           - **[Maskera v0.5.0 — Lager 1–3 (utan Judge-funktionen)](https://github.com/mrswedish/Maskera/releases/tag/v0.5.0)** finns permanent sparad under Releases.

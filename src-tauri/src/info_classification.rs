@@ -156,6 +156,7 @@ const INFO_GROUPS: &[InfoPrototypeGroup] = &[
         reason: "Liknar interna APT-/mötesanteckningar eller en kollegas sammanfattning från kurs/seminarium avsedd för arbetsgruppen.",
         prompts: &[
             "Minnesanteckningar från arbetsplatsträff APT, enhetsmöte, veckomöte eller arbetsgruppsmöte om pågående arbete, lokala rutiner och uppföljning.",
+            "Övriga frågor på APT eller personalmöte, påminnelse om att besvara årets medarbetarenkät eller pulsmätning, nuvarande svarsfrekvens på enheten, skyddsrond och allmän ekonomisk uppföljning.",
             "Sammanfattning av kursen jag gick, egna anteckningar från seminarium, konferens, workshop eller föreläsning som delas med kollegorna i arbetsgruppen.",
         ],
     },
@@ -183,7 +184,7 @@ const INFO_GROUPS: &[InfoPrototypeGroup] = &[
         level: "yellow",
         reason: "Vanliga medarbetarsamtal om mål och kompetensutveckling är normalt Gul information — men kontrollera noga: om samtalet berör ohälsa, sjukskrivning, rehab, individuell lön eller misskötsamhet ska det hanteras som RÖD.",
         prompts: &[
-            "Mall och anteckningar från årligt medarbetarsamtal om kompetensutveckling, trivsel, arbetsmål och framtida utvecklingsplan på arbetsplatsen.",
+            "Underlag, mall och anteckningar inför årligt medarbetarsamtal eller utvecklingssamtal om hur arbetsåret har fungerat, trivsel, kompetensutveckling, arbetsmål och framtida utvecklingsplan.",
         ],
     },
 ];
@@ -1166,6 +1167,33 @@ Anders berättar att sömnsvårigheterna och hjärtklappningen har förvärrats 
         assert_eq!(
             soft_rehab_rep.level, "red",
             "Individuell ohälso-/sjukskrivningsuppföljning ska bli RÖD även utan ordet rehabsamtal"
+        );
+
+        // 16. GUL APT med punkt om medarbetarenkät får INTE feltaggas som "Medarbetarsamtal (Kontrollera om innehållet är Rött)"
+        let apt_survey_doc = "\
+MINNESANTECKNINGAR – ARBETSPLATSTRÄFF (APT)\n\n\
+Enhet: Vårdcentralen Centrum, Region Vätterdalen\n\n\
+6. Övriga frågor\n\n\
+Årets medarbetarenkät stänger på tisdag den 17 november – nuvarande svarsfrekvens på enheten är 74 procent. Avsätt 15 minuter under morgondagens administrativa tid om du ännu inte har svarat.";
+        let apt_survey_rep =
+            classify_information_text(apt_survey_doc, &[], Some(&clf), |_, _| {});
+        println!(
+            "16. GUL APT Medarbetarenkät => level={}, findings={:?}",
+            apt_survey_rep.level,
+            apt_survey_rep
+                .section_findings
+                .iter()
+                .map(|f| (&f.category, &f.level))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(apt_survey_rep.level, "yellow");
+        assert!(
+            apt_survey_rep
+                .section_findings
+                .iter()
+                .all(|f| !f.category.starts_with("Medarbetarsamtal")),
+            "Medarbetarenkät på APT ska inte taggas som individuellt Medarbetarsamtal, fick: {:?}",
+            apt_survey_rep.section_findings
         );
     }
 }
