@@ -131,7 +131,7 @@ const BATCH_SIZE: usize = 8;
 /// Delar texten i naturliga stycke-/meningsblock utan onödig kopiering (`O(N)`).
 /// Lägger endast överlapp när vi tvingas bryta mitt i en mening — vid stycke-
 /// eller meningsslut behövs inget överlapp alls (sparar ~30–40 % beräkning).
-fn chunk_text_with_limit<'a>(text: &'a str, max_chars: usize) -> Vec<(&'a str, usize)> {
+fn chunk_text_with_limit(text: &str, max_chars: usize) -> Vec<(&str, usize)> {
     if text.is_empty() {
         return vec![];
     }

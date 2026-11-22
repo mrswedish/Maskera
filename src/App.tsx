@@ -21,7 +21,6 @@ import {
   Moon,
   Monitor,
   Pencil,
-  FolderOpen,
   FileSearch,
   Trash2,
 } from "lucide-react";
@@ -39,7 +38,6 @@ import type {
   ModelsStatus,
   SetupProgress,
   InfoClassificationReport,
-  InfoSectionFinding,
   JudgeModelStatus,
   JudgeDownloadProgress,
 } from "./types";
@@ -47,216 +45,32 @@ import {
   buildTranslationTable,
   buildMaskedText,
   unmaskText,
+  translationLookupKey,
 } from "./translationUtils";
 import {
+  matchKey,
+  findMatchesInRange,
+  hasMatchInRange,
   reconcileMatchesAfterEdit,
   renderInlineFormattedText,
   renderFormattedMarkdown,
   markdownToCleanHtml,
   markdownToCleanPlainText,
 } from "./markdownUtils";
-
-const REGEX_LABELS = [
-  "Personnummer",
-  "E-post",
-  "Telefonnummer",
-  "Org.nummer",
-  "Konto/Giro",
-  "IP-adress",
-  "Kortnummer",
-  "Hemlighet/Nyckel",
-] as const;
-
-const ENTITY_LABELS = [
-  "Person",
-  "Roll/Titel",
-  "Organisation",
-  "Plats",
-  "Övrigt",
-  "Tid",
-  "Händelse",
-] as const;
-
-const ALL_CATEGORIES = [...REGEX_LABELS, ...ENTITY_LABELS];
-
-const PRESETS = {
-  ai_safe: {
-    name: "AI-säker",
-    entities: [
-      "Personnummer",
-      "E-post",
-      "Telefonnummer",
-      "Org.nummer",
-      "Konto/Giro",
-      "Kortnummer",
-      "Hemlighet/Nyckel",
-      "Person",
-      "Organisation",
-      "Plats",
-      "Övrigt",
-    ],
-  },
-  id_only: {
-    name: "Endast ID & kontakt",
-    entities: [
-      "Personnummer",
-      "E-post",
-      "Telefonnummer",
-      "Org.nummer",
-      "Konto/Giro",
-      "Kortnummer",
-      "Hemlighet/Nyckel",
-    ],
-  },
-  strict: {
-    name: "Strikt (Allt)",
-    entities: [...ALL_CATEGORIES],
-  },
-} as const;
-
-type PresetKey = keyof typeof PRESETS;
-
-// WCAG AA-kalibrerade kategorifärger (>= 5.0:1 kontrast mot vit text #ffffff)
-const COLORS: Record<string, string> = {
-  Personnummer: "#b91c1c",
-  "E-post": "#1d4ed8",
-  Telefonnummer: "#b45309",
-  "Org.nummer": "#7e22ce",
-  "Konto/Giro": "#be185d",
-  "IP-adress": "#0369a1",
-  Kortnummer: "#991b1b",
-  "Hemlighet/Nyckel": "#9f1239",
-  Person: "#5b21b6",
-  "Roll/Titel": "#3730a3",
-  Organisation: "#047857",
-  Plats: "#9d174d",
-  Övrigt: "#475569",
-  Tid: "#0e7490",
-  Händelse: "#854d0e",
-  Manuell: "#c2410c",
-};
-
-type ColorSchemeSetting = "light dark" | "light" | "dark";
-
-function matchKey(m: Match): string {
-  return `${m.start}-${m.end}`;
-}
-
-function fixMojibake(text: string): string {
-  try {
-    const bytes = new Uint8Array(text.length);
-    for (let i = 0; i < text.length; i++) {
-      bytes[i] = text.charCodeAt(i) & 0xff;
-    }
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    return text;
-  }
-}
-
-function buildByteToCharMap(text: string, needed: Set<number>): Map<number, number> {
-  const byteToChar = new Map<number, number>();
-  if (needed.size === 0) return byteToChar;
-
-  let u16 = 0;
-  let byteIdx = 0;
-  const len = text.length;
-
-  while (u16 < len) {
-    if (needed.has(byteIdx)) {
-      byteToChar.set(byteIdx, u16);
-      if (byteToChar.size === needed.size) break;
-    }
-    const code = text.charCodeAt(u16);
-    if (code < 0x80) {
-      byteIdx += 1;
-      u16 += 1;
-    } else if (code < 0x800) {
-      byteIdx += 2;
-      u16 += 1;
-    } else if (code >= 0xd800 && code <= 0xdbff && u16 + 1 < len) {
-      byteIdx += 4;
-      u16 += 2;
-    } else {
-      byteIdx += 3;
-      u16 += 1;
-    }
-  }
-  if (needed.has(byteIdx)) {
-    byteToChar.set(byteIdx, u16);
-  }
-  return byteToChar;
-}
-
-function fixByteOffsets(text: string, rawMatches: Match[]): Match[] {
-  if (rawMatches.length === 0) return rawMatches;
-
-  const needed = new Set<number>();
-  for (const m of rawMatches) {
-    needed.add(m.start);
-    needed.add(m.end);
-  }
-
-  const byteToChar = buildByteToCharMap(text, needed);
-
-  return rawMatches.map((m) => ({
-    ...m,
-    start: byteToChar.get(m.start) ?? m.start,
-    end: byteToChar.get(m.end) ?? m.end,
-  }));
-}
-
-function fixFindingOffsets(
-  text: string,
-  rawFindings: ParagraphFinding[]
-): ParagraphFinding[] {
-  if (rawFindings.length === 0) return rawFindings;
-
-  const needed = new Set<number>();
-  for (const f of rawFindings) {
-    needed.add(f.start);
-    needed.add(f.end);
-  }
-
-  const byteToChar = buildByteToCharMap(text, needed);
-
-  return rawFindings.map((f) => ({
-    ...f,
-    start: Math.min(text.length, byteToChar.get(f.start) ?? f.start),
-    end: Math.min(text.length, byteToChar.get(f.end) ?? f.end),
-  }));
-}
-
-function fixInfoSectionOffsets(
-  text: string,
-  rawFindings: InfoSectionFinding[]
-): InfoSectionFinding[] {
-  if (rawFindings.length === 0) return rawFindings;
-
-  const needed = new Set<number>();
-  for (const f of rawFindings) {
-    needed.add(f.start);
-    needed.add(f.end);
-  }
-
-  const byteToChar = buildByteToCharMap(text, needed);
-
-  return rawFindings.map((f) => ({
-    ...f,
-    start: Math.min(text.length, byteToChar.get(f.start) ?? f.start),
-    end: Math.min(text.length, byteToChar.get(f.end) ?? f.end),
-  }));
-}
-
-function normalizeInputText(raw: string): string {
-  return fixMojibake(raw)
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .replace(/\u00a0/g, " ")
-    .replace(/\u2028/g, "\n")
-    .replace(/\u2029/g, "\n")
-    .replace(/\ufffd/g, " ");
-}
+import {
+  ENTITY_LABELS,
+  ALL_CATEGORIES,
+  PRESETS,
+  COLORS,
+  fixByteOffsets,
+  fixFindingOffsets,
+  fixInfoSectionOffsets,
+  normalizeInputText,
+} from "./constants";
+import type { ColorSchemeSetting, PresetKey } from "./constants";
+import { FirstTimeSetup } from "./components/FirstTimeSetup";
+import { JudgeDialog } from "./components/JudgeDialog";
+import { InfoClassificationCards } from "./components/InfoClassificationCards";
 
 export default function App() {
   // Huvudläge (Alternativ B: två separata system — Avidentifiera för AI vs Klassificera information)
@@ -305,10 +119,10 @@ export default function App() {
   const [sourceText, setSourceText] = useState("");
   const [fileName, setFileName] = useState("");
   const [docSummary, setDocSummary] = useState<string>("");
-  const [originalDocxBytes, setOriginalDocxBytes] = useState<number[] | null>(
+  const [originalDocxBytes, setOriginalDocxBytes] = useState<Uint8Array | null>(
     null
   );
-  const [originalXlsxBytes, setOriginalXlsxBytes] = useState<number[] | null>(
+  const [originalXlsxBytes, setOriginalXlsxBytes] = useState<Uint8Array | null>(
     null
   );
   const [importingDoc, setImportingDoc] = useState(false);
@@ -397,6 +211,8 @@ export default function App() {
   const lastCopyMsgRef = useRef<string>("");
   const copyTimerMaskedRef = useRef<number | undefined>(undefined);
   const copyTimerUnmaskedRef = useRef<number | undefined>(undefined);
+  const skipNextSemanticEffectRef = useRef(false);
+  const refreshReqIdRef = useRef(0);
 
   // Dra-och-släpp
   const [isDragOver, setIsDragOver] = useState(false);
@@ -758,6 +574,10 @@ export default function App() {
   // Uppdatera trafikljus direkt (< 1 ms med cachade styckefynd) när användaren klickar på ord eller klarmarkerar stycken
   useEffect(() => {
     if (!hasAnalyzed || !sourceText.trim()) return;
+    if (skipNextSemanticEffectRef.current) {
+      skipNextSemanticEffectRef.current = false;
+      return;
+    }
     runSemanticClassification(
       sourceText,
       matches,
@@ -803,12 +623,16 @@ export default function App() {
       if (!hasAnalyzed || !sourceText.trim() || analyzing || classifying) {
         return;
       }
+      const reqId = ++refreshReqIdRef.current;
       try {
         const raw = await invoke<Match[]>("analyze_text", {
           text: sourceText,
           entities: nextEntities,
           threshold,
         });
+        if (reqId !== refreshReqIdRef.current) {
+          return;
+        }
         const scanned = fixByteOffsets(sourceText, raw);
         setMatches((prev) => {
           const manuals = prev.filter((m) => m.source === "manuell");
@@ -938,21 +762,22 @@ export default function App() {
     }
   };
 
-  // Importera fil (Word .docx/.odt, Excel .xlsx/.xls/.ods, PDF .pdf, eller textfil) lokalt via Rust
+  // Importera fil (Word .docx/.odt, Excel .xlsx/.xls/.ods, PDF .pdf, eller textfil) lokalt via binär Tauri IPC
   const handleImportFile = useCallback(async (file: File) => {
     setImportingDoc(true);
     try {
       const buf = await file.arrayBuffer();
-      const byteArr = Array.from(new Uint8Array(buf));
-      const imported = await invoke<ImportedDocument>("import_document_bytes", {
-        fileName: file.name,
-        bytes: byteArr,
-      });
+      const rawBytes = new Uint8Array(buf);
+      const imported = await invoke<ImportedDocument>(
+        "import_document_bytes",
+        rawBytes,
+        { headers: { "x-file-name": encodeURIComponent(file.name) } }
+      );
       setSourceText(normalizeInputText(imported.text));
       setFileName(imported.file_name);
       setDocSummary(imported.summary);
-      setOriginalDocxBytes(imported.can_export_docx ? byteArr : null);
-      setOriginalXlsxBytes(imported.can_export_xlsx ? byteArr : null);
+      setOriginalDocxBytes(imported.can_export_docx ? rawBytes : null);
+      setOriginalXlsxBytes(imported.can_export_xlsx ? rawBytes : null);
       setIsEditing(true);
       setIsEditingClassify(true);
       setInfoEditedSinceScan(false);
@@ -1148,6 +973,7 @@ export default function App() {
   // Analysera text (Steg 1: Regex + BERT NER, Steg 2: EmbeddingGemma 2)
   const handleAnalyze = async () => {
     if (!sourceText.trim() || analyzing || classifying) return;
+    refreshReqIdRef.current += 1;
     setAnalyzing(true);
     setNerProgress(null);
     setEditingSlice(null);
@@ -1163,6 +989,7 @@ export default function App() {
       );
       const emptyIgnored = new Set<string>();
       const emptyDismissed = new Set<number>();
+      skipNextSemanticEffectRef.current = true;
       setMatches(sorted);
       setIgnoredKeys(emptyIgnored);
       setDismissedFindings(emptyDismissed);
@@ -1339,7 +1166,7 @@ export default function App() {
     try {
       await invoke("export_masked_docx", {
         path,
-        originalBytes: originalDocxBytes,
+        originalBytes: Array.from(originalDocxBytes),
         replacements,
       });
     } catch (e) {
@@ -1375,7 +1202,7 @@ export default function App() {
     try {
       await invoke("export_masked_xlsx", {
         path,
-        originalBytes: originalXlsxBytes,
+        originalBytes: Array.from(originalXlsxBytes),
         replacements,
       });
     } catch (e) {
@@ -1478,9 +1305,7 @@ export default function App() {
   const renderInlineRangeWithMatches = useCallback(
     (rangeStart: number, rangeEnd: number, keyPrefix: string) => {
       if (rangeEnd <= rangeStart) return null;
-      const sliceMatches = matches.filter(
-        (m) => m.end > rangeStart && m.start < rangeEnd
-      );
+      const sliceMatches = findMatchesInRange(matches, rangeStart, rangeEnd);
       if (sliceMatches.length === 0) {
         return (
           <span key={`${keyPrefix}-plain`}>
@@ -1513,7 +1338,8 @@ export default function App() {
         const key = matchKey(m);
         const ignored = ignoredKeys.has(key);
         const masked =
-          activeTranslationTable.get(m.text)?.maskedLabel ?? m.label;
+          activeTranslationTable.get(translationLookupKey(m))?.maskedLabel ??
+          m.label;
 
         nodes.push(
           <mark
@@ -1588,8 +1414,10 @@ export default function App() {
       if (headingMatch) {
         const prefixLen = headingMatch[1].length;
         const level = headingMatch[1].trim().length;
-        const hasMatchInPrefix = matches.some(
-          (m) => m.start < lineStart + prefixLen && m.end > lineStart
+        const hasMatchInPrefix = hasMatchInRange(
+          matches,
+          lineStart,
+          lineStart + prefixLen
         );
         if (!hasMatchInPrefix) {
           return (
@@ -1618,11 +1446,9 @@ export default function App() {
         const leadWs = rawLine.length - rawLine.trimStart().length;
         const innerStart = lineStart + leadWs + 2;
         const innerEnd = lineStart + leadWs + trimmed.length - 2;
-        const hasMatchAtEdges = matches.some(
-          (m) =>
-            (m.start < innerStart && m.end > lineStart) ||
-            (m.start < lineEnd && m.end > innerEnd)
-        );
+        const hasMatchAtEdges =
+          hasMatchInRange(matches, lineStart, innerStart) ||
+          hasMatchInRange(matches, innerEnd, lineEnd);
         if (!hasMatchAtEdges) {
           return (
             <div key={`${keyPrefix}-bh`} className="doc-heading doc-heading-2">
@@ -1640,8 +1466,10 @@ export default function App() {
       const bulletMatch = rawLine.match(/^(\s*[-*•]\s+)/);
       if (bulletMatch) {
         const prefixLen = bulletMatch[1].length;
-        const hasMatchInPrefix = matches.some(
-          (m) => m.start < lineStart + prefixLen && m.end > lineStart
+        const hasMatchInPrefix = hasMatchInRange(
+          matches,
+          lineStart,
+          lineStart + prefixLen
         );
         if (!hasMatchInPrefix) {
           return (
@@ -2490,195 +2318,19 @@ export default function App() {
       {!modelsChecked ? (
         <main className="main-workspace" aria-busy="true" />
       ) : showFirstTimeSetup ? (
-        /* ── Alternativ A: Välkomst- & engångsinstallationsvy (visas endast om modeller saknas vid start) ── */
-        <main className="setup-workspace">
-          <section
-            className="setup-card"
-            aria-labelledby="setup-heading"
-          >
-            <div className="setup-card-header">
-              <div className="setup-icon-badge" aria-hidden="true">
-                <Sparkles size={22} />
-              </div>
-              <div className="setup-title-group">
-                <h2 id="setup-heading" className="setup-title">
-                  Förbereder lokal AI — engångsnedladdning
-                </h2>
-                <p className="setup-subtitle">
-                  Maskera hämtar nu språk- och kontextmodellerna (~318 MB totalt)
-                  en enda gång till din dator. Därefter körs all avidentifiering
-                  och säkerhetskontroll <strong>100 % lokalt och offline</strong>{" "}
-                  — ingen text lämnar någonsin din dator.
-                </p>
-              </div>
-            </div>
-
-            <ul className="setup-model-list" role="list">
-              <li
-                className={`setup-model-item ${
-                  nerDoneInSetup
-                    ? "done"
-                    : setupBusy && !setupError
-                    ? "active"
-                    : ""
-                }`}
-              >
-                <div className="setup-model-info">
-                  <div className="setup-model-name-row">
-                    <strong>1. Svensk BERT NER</strong>
-                    <span className="setup-model-size">~121 MB</span>
-                  </div>
-                  <p className="setup-model-desc">
-                    Hittar personnamn, organisationer, platser, tider och
-                    händelser i svensk löptext (KBLab/Kungliga biblioteket).
-                  </p>
-                </div>
-                <span
-                  className={`setup-step-pill ${
-                    nerDoneInSetup
-                      ? "done"
-                      : setupBusy && !setupError
-                      ? "active"
-                      : "pending"
-                  }`}
-                >
-                  {nerDoneInSetup ? (
-                    <>
-                      <Check size={13} aria-hidden="true" />
-                      <span>Klar</span>
-                    </>
-                  ) : setupBusy && !setupError ? (
-                    <>
-                      <RefreshCw size={13} className="spin" aria-hidden="true" />
-                      <span>Hämtar…</span>
-                    </>
-                  ) : (
-                    <span>Väntar</span>
-                  )}
-                </span>
-              </li>
-
-              <li
-                className={`setup-model-item ${
-                  gemmaDoneInSetup
-                    ? "done"
-                    : setupBusy && !setupError && nerDoneInSetup
-                    ? "active"
-                    : ""
-                }`}
-              >
-                <div className="setup-model-info">
-                  <div className="setup-model-name-row">
-                    <strong>2. EmbeddingGemma 2</strong>
-                    <span className="setup-model-size">~197 MB</span>
-                  </div>
-                  <p className="setup-model-desc">
-                    Semantisk säkerhetskontroll som varnar för patient-/vårduppgifter,
-                    företagshemligheter, sårbarheter och HR-ärenden.
-                  </p>
-                </div>
-                <span
-                  className={`setup-step-pill ${
-                    gemmaDoneInSetup
-                      ? "done"
-                      : setupBusy && !setupError && nerDoneInSetup
-                      ? "active"
-                      : "pending"
-                  }`}
-                >
-                  {gemmaDoneInSetup ? (
-                    <>
-                      <Check size={13} aria-hidden="true" />
-                      <span>Klar</span>
-                    </>
-                  ) : setupBusy && !setupError && nerDoneInSetup ? (
-                    <>
-                      <RefreshCw size={13} className="spin" aria-hidden="true" />
-                      <span>Hämtar…</span>
-                    </>
-                  ) : (
-                    <span>Väntar</span>
-                  )}
-                </span>
-              </li>
-            </ul>
-
-            <div className="setup-progress-section">
-              <div
-                id="setup-progress-label"
-                className="setup-progress-meta"
-                role="status"
-                aria-live="polite"
-              >
-                <span className="setup-progress-status">
-                  {setupError
-                    ? "Nedladdningen avbröts"
-                    : setupProgress?.label || "Ansluter till HuggingFace…"}
-                </span>
-                {setupBytesText && !setupError && (
-                  <span className="setup-progress-bytes">{setupBytesText}</span>
-                )}
-              </div>
-              <progress
-                id="setup-progress-bar"
-                className="setup-progress-bar"
-                aria-labelledby="setup-progress-label"
-                max={100}
-                value={isDeterminateSetupProgress ? setupPercent : undefined}
-              />
-            </div>
-
-            {setupError ? (
-              <div className="setup-error-box" role="alert">
-                <div className="setup-error-header">
-                  <AlertTriangle size={16} aria-hidden="true" />
-                  <strong>Kunde inte hämta AI-modellerna automatiskt</strong>
-                </div>
-                <p className="setup-error-detail">{setupError}</p>
-                <div className="setup-error-actions">
-                  <button
-                    type="button"
-                    className="tb-btn-primary"
-                    onClick={runEnsureAllModels}
-                  >
-                    <RefreshCw size={15} aria-hidden="true" />
-                    <span>Försök igen</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="tb-btn"
-                    onClick={handlePickLocalModelDir}
-                  >
-                    <FolderOpen size={15} aria-hidden="true" />
-                    <span>Välj lokal modellmapp…</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="tb-btn-subtle"
-                    onClick={() => setShowFirstTimeSetup(false)}
-                  >
-                    <span>Öppna ändå (endast mönster/regex offline)</span>
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="setup-offline-footer">
-                <span>
-                  Har du redan modellfilerna på ett USB-minne eller en intern
-                  nätverksdisk?
-                </span>
-                <button
-                  type="button"
-                  className="tb-btn-subtle"
-                  onClick={handlePickLocalModelDir}
-                >
-                  <FolderOpen size={13} aria-hidden="true" />
-                  <span>Välj lokal modellmapp…</span>
-                </button>
-              </div>
-            )}
-          </section>
-        </main>
+        <FirstTimeSetup
+          nerDoneInSetup={nerDoneInSetup}
+          gemmaDoneInSetup={gemmaDoneInSetup}
+          setupBusy={setupBusy}
+          setupError={setupError}
+          setupProgress={setupProgress}
+          setupBytesText={setupBytesText}
+          isDeterminateSetupProgress={isDeterminateSetupProgress}
+          setupPercent={setupPercent}
+          onRetry={runEnsureAllModels}
+          onPickLocalModelDir={handlePickLocalModelDir}
+          onSkipOffline={() => setShowFirstTimeSetup(false)}
+        />
       ) : (
         <>
 
@@ -2831,244 +2483,20 @@ export default function App() {
             </div>
           </div>
 
-          {/* Native modal <dialog> för aktivt val, nedladdning och borttagning av Lager 4 (MWG dialog & light-dismiss-a-dialog) */}
-          <dialog
-            ref={judgeDialogRef}
-            closedby={judgeBusy ? "none" : "any"}
-            aria-labelledby="judge-dialog-title"
-            className="judge-dialog"
-            onCancel={(e) => {
-              if (judgeBusy) e.preventDefault();
-            }}
-            onClick={handleJudgeDialogBackdropClick}
-          >
-            <div className="judge-dialog-inner">
-              <header className="judge-dialog-header">
-                <div className="setup-icon-badge" aria-hidden="true">
-                  <Sparkles size={20} />
-                </div>
-                <div className="judge-dialog-title-wrap">
-                  <h2 id="judge-dialog-title" className="judge-dialog-title">
-                    {judgeDialogMode === "manage" && judgeStatus.installed
-                      ? "Hantera Lager 4 — Helhetsbedömning (Judge)"
-                      : "Aktivera Lager 4 — Helhetsbedömning (Judge)"}
-                  </h2>
-                  <p className="judge-dialog-subtitle">
-                    Aktivt tillval enbart för vyn{" "}
-                    <strong>Klassificera information</strong> · 100 % lokalt på
-                    din dator
-                  </p>
-                </div>
-              </header>
-
-              <div className="judge-dialog-body">
-                <div className="judge-comparison-grid">
-                  <div className="judge-compare-card">
-                    <strong>Lager 3 (Standard · styckenivå)</strong>
-                    <p>
-                      Granskar texten stycke för stycke på under 1 sekund. Kan
-                      ibland ge för högt utslag (t.ex. Röd på ett kursreferat)
-                      när enstaka ord liknar känsliga ämnen utan att modellen
-                      ser helheten.
-                    </p>
-                  </div>
-                  <div className="judge-compare-card highlight">
-                    <strong>Lager 4 — Judge (Helhetsbedömning)</strong>
-                    <p>
-                      En lokal språkmodell (<em>Gemma 4 E2B</em>) läser
-                      dokumentets inledning, rubriker, avslutning och flaggade
-                      stycken för att bedöma{" "}
-                      <strong>dokumentets helhet och syfte</strong> samt ge en
-                      kort motivering på svenska.
-                    </p>
-                  </div>
-                </div>
-
-                <dl className="judge-facts-list">
-                  <div className="judge-fact-row">
-                    <dt>Lagringsutrymme</dt>
-                    <dd>
-                      {judgeStatus.installed && judgeStatus.fileSizeBytes > 0 ? (
-                        <>
-                          Installerad lokalt på datorn (
-                          <strong>
-                            {(
-                              judgeStatus.fileSizeBytes / 1_000_000_000
-                            ).toFixed(2).replace(".", ",")}{" "}
-                            GB
-                          </strong>
-                          ). Du kan när som helst ta bort modellen nedan för att
-                          frigöra utrymmet.
-                        </>
-                      ) : (
-                        <>
-                          Kräver ca <strong>2,62 GB</strong> ledigt
-                          lagringsutrymme (engångsnedladdning, därefter helt
-                          offline). Kan tas bort med ett klick när du vill
-                          frigöra utrymmet.
-                        </>
-                      )}
-                    </dd>
-                  </div>
-                  <div className="judge-fact-row">
-                    <dt>Tidsåtgång</dt>
-                    <dd>
-                      Tar lite längre tid vid klassificering — räkna med ca{" "}
-                      <strong>3–8 sekunder extra</strong> per dokument medan
-                      modellen tolkar helheten.
-                    </dd>
-                  </div>
-                  <div className="judge-fact-row">
-                    <dt>Beslutsstöd &amp; säkerhet</dt>
-                    <dd>
-                      Ingen text lämnar datorn. Skarpa fynd i Lager 1
-                      (personnummer, bankkonton, kortnummer och lösenord/nycklar)
-                      har alltid vetorätt för <strong>RÖD</strong> nivå — och
-                      det är alltid du som fattar det slutliga beslutet.
-                    </dd>
-                  </div>
-                </dl>
-
-                {judgeBusy && (
-                  <div className="setup-progress-section judge-progress-box">
-                    <div
-                      id="judge-progress-label"
-                      className="setup-progress-meta"
-                      role="status"
-                      aria-live="polite"
-                    >
-                      <span className="setup-progress-status">
-                        {judgeProgress?.label || "Förbereder Lager 4…"}
-                      </span>
-                      {judgeProgress?.phase === "downloading" &&
-                        judgeProgress.totalBytes > 0 && (
-                          <span className="setup-progress-bytes">
-                            {(
-                              judgeProgress.downloadedBytes / 1_000_000_000
-                            )
-                              .toFixed(2)
-                              .replace(".", ",")}{" "}
-                            av{" "}
-                            {(judgeProgress.totalBytes / 1_000_000_000)
-                              .toFixed(2)
-                              .replace(".", ",")}{" "}
-                            GB (
-                            {Math.min(
-                              100,
-                              Math.max(
-                                1,
-                                Math.round(
-                                  (judgeProgress.downloadedBytes /
-                                    judgeProgress.totalBytes) *
-                                    100
-                                )
-                              )
-                            )}{" "}
-                            %)
-                          </span>
-                        )}
-                    </div>
-                    <progress
-                      className="setup-progress-bar"
-                      aria-labelledby="judge-progress-label"
-                      max={100}
-                      value={
-                        judgeProgress?.phase === "downloading" &&
-                        judgeProgress.totalBytes > 0
-                          ? Math.min(
-                              100,
-                              Math.max(
-                                1,
-                                Math.round(
-                                  (judgeProgress.downloadedBytes /
-                                    judgeProgress.totalBytes) *
-                                    100
-                                )
-                              )
-                            )
-                          : undefined
-                      }
-                    />
-                  </div>
-                )}
-
-                {judgeError && (
-                  <div className="setup-error-box" role="alert">
-                    <div className="setup-error-header">
-                      <AlertTriangle size={15} aria-hidden="true" />
-                      <strong>Åtgärden kunde inte slutföras</strong>
-                    </div>
-                    <p className="setup-error-detail">{judgeError}</p>
-                  </div>
-                )}
-              </div>
-
-              <footer className="judge-dialog-footer">
-                {judgeDialogMode === "manage" && judgeStatus.installed ? (
-                  <>
-                    <button
-                      type="button"
-                      className="tb-btn"
-                      disabled={judgeBusy}
-                      onClick={() => judgeDialogRef.current?.close()}
-                    >
-                      <span>Stäng</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="tb-btn judge-danger-btn"
-                      disabled={judgeBusy}
-                      onClick={handleDeleteJudgeModel}
-                    >
-                      <Trash2 size={15} aria-hidden="true" />
-                      <span>
-                        {judgeBusy
-                          ? "Tar bort modellfil…"
-                          : "Ta bort Lager 4 & frigör ~2,6 GB"}
-                      </span>
-                    </button>
-                  </>
-                ) : judgeBusy ? (
-                  <>
-                    <button
-                      type="button"
-                      className="tb-btn"
-                      onClick={handleCancelJudgeDownload}
-                    >
-                      <span>Avbryt nedladdning</span>
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <button
-                      type="button"
-                      className="tb-btn"
-                      onClick={() => judgeDialogRef.current?.close()}
-                    >
-                      <span>Avbryt</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="tb-btn"
-                      onClick={handleImportJudgeLocalDir}
-                      title="Importera GGUF-filen offline från lokal mapp eller USB"
-                    >
-                      <FolderOpen size={15} aria-hidden="true" />
-                      <span>Välj lokal mapp…</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="tb-btn-primary"
-                      onClick={handleConfirmActivateJudge}
-                    >
-                      <Download size={15} aria-hidden="true" />
-                      <span>Bekräfta &amp; ladda ner (~2,6 GB)</span>
-                    </button>
-                  </>
-                )}
-              </footer>
-            </div>
-          </dialog>
+          <JudgeDialog
+            dialogRef={judgeDialogRef}
+            mode={judgeDialogMode}
+            status={judgeStatus}
+            busy={judgeBusy}
+            progress={judgeProgress}
+            error={judgeError}
+            onBackdropClick={handleJudgeDialogBackdropClick}
+            onClose={() => judgeDialogRef.current?.close()}
+            onDelete={handleDeleteJudgeModel}
+            onCancelDownload={handleCancelJudgeDownload}
+            onImportLocalDir={handleImportJudgeLocalDir}
+            onConfirmActivate={handleConfirmActivateJudge}
+          />
 
           {sourceText && infoClassifying && (
             <section
@@ -3089,211 +2517,13 @@ export default function App() {
           )}
 
           {sourceText && !infoClassifying && infoReport && (
-            <section
-              aria-label="Resultat av informationsklassning"
-              className="info-cards-grid"
-            >
-              {/* Kort 1 (MWG card: <article> med direkta <header>- och <div>-regioner): Fråga 1 — Vad innehåller informationen? */}
-              <article
-                className={`info-card level-${infoReport.level}`}
-              >
-                <header className="info-card-header">
-                  <div className="info-card-header-top">
-                    <span
-                      className={`info-level-badge level-${infoReport.level}`}
-                    >
-                      {infoReport.level === "green" ? (
-                        <CheckCircle2 size={15} aria-hidden="true" />
-                      ) : infoReport.level === "yellow" ? (
-                        <AlertTriangle size={15} aria-hidden="true" />
-                      ) : (
-                        <XCircle size={15} aria-hidden="true" />
-                      )}
-                      <span>{infoReport.badgeTitle}</span>
-                    </span>
-                    <span
-                      className="info-scan-meta"
-                      title={
-                        infoReport.judge
-                          ? `Lager 1–3: ${infoReport.scanDurationMs} ms · Lager 4 (Judge): ${infoReport.judge.durationMs} ms`
-                          : `Lokal analys med Regex, BERT NER och EmbeddingGemma 2 (${infoReport.scanDurationMs} ms)`
-                      }
-                    >
-                      {infoReport.paragraphsScanned} avsnitt ·{" "}
-                      {infoReport.judge
-                        ? `${(
-                            (infoReport.scanDurationMs +
-                              infoReport.judge.durationMs) /
-                            1000
-                          )
-                            .toFixed(1)
-                            .replace(".", ",")} s (inkl. Lager 4)`
-                        : `${infoReport.scanDurationMs} ms`}
-                    </span>
-                  </div>
-                  <h2 className="info-card-title">
-                    1. Vad innehåller informationen?
-                  </h2>
-                </header>
-
-                <div className="info-card-content">
-                  <p className="info-lead">
-                    <strong>{infoReport.contentHeadline}.</strong>{" "}
-                    {infoReport.contentExplanation}
-                  </p>
-
-                  {infoReport.judge ? (
-                    <div className="info-judge-box" role="note">
-                      <div className="info-judge-header">
-                        <span className="info-judge-badge">
-                          <Sparkles size={12} aria-hidden="true" />
-                          <span>Lager 4 · Judge (Helhet)</span>
-                        </span>
-                        <span className="info-judge-doctype">
-                          {infoReport.judge.documentType}
-                        </span>
-                        {infoReport.judge.hardVetoApplied ? (
-                          <span className="info-judge-delta veto">
-                            Lager 1-veto: RÖD behålls
-                          </span>
-                        ) : infoReport.judge.levelAdjusted ? (
-                          <span className="info-judge-delta adjusted">
-                            Justerad{" "}
-                            {infoReport.judge.layer3Level === "red"
-                              ? "Röd"
-                              : infoReport.judge.layer3Level === "yellow"
-                              ? "Gul"
-                              : "Grön"}{" "}
-                            →{" "}
-                            {infoReport.judge.finalLevel === "red"
-                              ? "Röd"
-                              : infoReport.judge.finalLevel === "yellow"
-                              ? "Gul"
-                              : "Grön"}
-                          </span>
-                        ) : (
-                          <span className="info-judge-delta confirmed">
-                            Bekräftar{" "}
-                            {infoReport.judge.finalLevel === "red"
-                              ? "Röd"
-                              : infoReport.judge.finalLevel === "yellow"
-                              ? "Gul"
-                              : "Grön"}
-                          </span>
-                        )}
-                      </div>
-                      <p className="info-judge-rationale">
-                        {infoReport.judge.rationale}
-                      </p>
-                    </div>
-                  ) : (
-                    judgeEnabled &&
-                    judgeStatus.installed &&
-                    !infoEditedSinceScan && (
-                      <div className="info-judge-rerun-hint">
-                        <span>
-                          Lager 4 (Judge) är nu aktiverat men ingick inte i
-                          denna körning.
-                        </span>
-                        <button
-                          type="button"
-                          className="tb-btn-subtle rescan-chip"
-                          onClick={() => void runInfoClassification(true)}
-                        >
-                          <Sparkles size={12} aria-hidden="true" />
-                          <span>Kör helhetsbedömning (Lager 4)</span>
-                        </button>
-                      </div>
-                    )
-                  )}
-
-                  {infoReport.signals.length > 0 && (
-                    <ul className="info-signals-list" role="list">
-                      {infoReport.signals.map((sig, idx) => (
-                        <li key={`${sig.title}-${idx}`} className="info-signal-item">
-                          <span
-                            className={`sev-pill ${
-                              sig.level === "red"
-                                ? "high"
-                                : sig.level === "yellow"
-                                ? "medium"
-                                : "green"
-                            }`}
-                          >
-                            {sig.level === "red" ? (
-                              <XCircle size={11} aria-hidden="true" />
-                            ) : sig.level === "yellow" ? (
-                              <AlertTriangle size={11} aria-hidden="true" />
-                            ) : (
-                              <CheckCircle2 size={11} aria-hidden="true" />
-                            )}
-                            <span>
-                              {sig.level === "red"
-                                ? "Röd"
-                                : sig.level === "yellow"
-                                ? "Gul"
-                                : "Grön"}
-                            </span>
-                          </span>
-                          <div className="info-signal-text">
-                            <strong>{sig.title}</strong>
-                            <span>{sig.detail}</span>
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              </article>
-
-              {/* Kort 2 (MWG card): Fråga 2 — Hur får vi hantera informationen? */}
-              <article
-                className={`info-card guidance-card level-${infoReport.level}`}
-              >
-                <header className="info-card-header">
-                  <div className="info-card-header-top">
-                    <span className="info-step-pill">
-                      Lokalt beslutsstöd · Lagring &amp; delning
-                    </span>
-                  </div>
-                  <h2 className="info-card-title">
-                    2. {infoReport.handling.heading}
-                  </h2>
-                </header>
-
-                <div className="info-card-content">
-                  <p className="info-lead">{infoReport.handling.summary}</p>
-                  <dl className="info-guidance-dl">
-                    <div className="info-guidance-row">
-                      <dt>Lagring</dt>
-                      <dd>{infoReport.handling.storageGuidance}</dd>
-                    </div>
-                    <div className="info-guidance-row">
-                      <dt>Delning</dt>
-                      <dd>{infoReport.handling.sharingGuidance}</dd>
-                    </div>
-                    <div className="info-guidance-row">
-                      <dt>Exempel</dt>
-                      <dd>{infoReport.handling.examplesNote}</dd>
-                    </div>
-                  </dl>
-                  <div className="info-decision-callout" role="note">
-                    <Shield
-                      size={16}
-                      className="info-callout-icon"
-                      aria-hidden="true"
-                    />
-                    <p className="info-callout-text">
-                      <strong>
-                        Lokalt beslutsstöd — det är alltid du som fattar
-                        beslutet.
-                      </strong>{" "}
-                      {infoReport.handling.disclaimer}
-                    </p>
-                  </div>
-                </div>
-              </article>
-            </section>
+            <InfoClassificationCards
+              report={infoReport}
+              judgeEnabled={judgeEnabled}
+              judgeStatus={judgeStatus}
+              infoEditedSinceScan={infoEditedSinceScan}
+              onRunJudgeClassification={() => void runInfoClassification(true)}
+            />
           )}
 
           <main className="main-workspace classify-workspace">

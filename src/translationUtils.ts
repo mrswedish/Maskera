@@ -16,15 +16,20 @@ function maskedLabel(label: string, source: string, counter: number): string {
   return `${baseLabel} ${first}${second}`;
 }
 
+export function translationLookupKey(
+  m: Pick<Match, "label" | "text">
+): string {
+  // För yrkesroller slås meningsinledande versal ("Verksamhetschefen") och gemen
+  // ("verksamhetschefen") ihop till samma [ROLL A] så AI:n ser att det är samma roll.
+  return m.label === "Roll/Titel" ? `role:${m.text.toLowerCase()}` : m.text;
+}
+
 export function buildTranslationTable(matches: Match[]): TranslationTable {
   const table: TranslationTable = new Map<string, TranslationEntry>();
   const counters = new Map<string, number>();
 
   for (const m of matches) {
-    // För yrkesroller slås meningsinledande versal ("Verksamhetschefen") och gemen
-    // ("verksamhetschefen") ihop till samma [ROLL A] så AI:n ser att det är samma roll.
-    const lookupKey =
-      m.label === "Roll/Titel" ? `role:${m.text.toLowerCase()}` : m.text;
+    const lookupKey = translationLookupKey(m);
 
     if (table.has(lookupKey)) {
       const entry = table.get(lookupKey)!;

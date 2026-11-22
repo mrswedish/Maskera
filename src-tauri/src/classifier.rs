@@ -711,6 +711,7 @@ fn push_paragraph<'a>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_report(
     active_pii_count: usize,
     unmasked_pii_count: usize,

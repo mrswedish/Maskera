@@ -1,8 +1,54 @@
 import React from "react";
 import { Match } from "./types";
 
-export function matchKeyStr(m: { start: number; end: number; text: string }): string {
-  return `${m.start}:${m.end}:${m.text}`;
+export function matchKey(m: Pick<Match, "start" | "end">): string {
+  return `${m.start}-${m.end}`;
+}
+
+/**
+ * Binärsökning (O(log M)) för första träff i en sorterad, icke-överlappande Match-lista
+ * vars `end > rangeStart`.
+ */
+function firstMatchEndingAfter(sortedMatches: Match[], rangeStart: number): number {
+  let lo = 0;
+  let hi = sortedMatches.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (sortedMatches[mid].end <= rangeStart) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}
+
+/** Returnerar alla träffar som överlappar `[rangeStart, rangeEnd)` i O(log M + K). */
+export function findMatchesInRange(
+  sortedMatches: Match[],
+  rangeStart: number,
+  rangeEnd: number
+): Match[] {
+  if (sortedMatches.length === 0 || rangeEnd <= rangeStart) return [];
+  const startIdx = firstMatchEndingAfter(sortedMatches, rangeStart);
+  const out: Match[] = [];
+  for (let i = startIdx; i < sortedMatches.length; i++) {
+    const m = sortedMatches[i];
+    if (m.start >= rangeEnd) break;
+    out.push(m);
+  }
+  return out;
+}
+
+/** Kontrollerar i O(log M) utan allokering om någon träff överlappar `[rangeStart, rangeEnd)`. */
+export function hasMatchInRange(
+  sortedMatches: Match[],
+  rangeStart: number,
+  rangeEnd: number
+): boolean {
+  if (sortedMatches.length === 0 || rangeEnd <= rangeStart) return false;
+  const idx = firstMatchEndingAfter(sortedMatches, rangeStart);
+  return idx < sortedMatches.length && sortedMatches[idx].start < rangeEnd;
 }
 
 /**
@@ -44,7 +90,7 @@ export function reconcileMatchesAfterEdit(
   const nextIgnored = new Set<string>();
 
   for (const m of prevMatches) {
-    const oldKey = matchKeyStr(m);
+    const oldKey = matchKey(m);
     const wasIgnored = prevIgnored.has(oldKey);
 
     if (m.end <= prefixLen) {
@@ -62,7 +108,7 @@ export function reconcileMatchesAfterEdit(
         newText.slice(shifted.start, shifted.end) === shifted.text
       ) {
         nextMatches.push(shifted);
-        if (wasIgnored) nextIgnored.add(matchKeyStr(shifted));
+        if (wasIgnored) nextIgnored.add(matchKey(shifted));
       }
     } else {
       // Träffen överlappade det redigerade området — behåll endast om exakt ord står kvar på plats

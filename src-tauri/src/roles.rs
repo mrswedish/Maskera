@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+use std::sync::LazyLock;
+
 use crate::ner::Match;
 
 #[derive(Debug, Clone)]
@@ -360,53 +363,102 @@ fn strip_genitive(word: &str) -> &str {
 }
 
 fn is_role_word(lower: &str) -> bool {
-    let char_count = lower.chars().count();
-    if char_count < 2 {
+    if lower.len() < 2 {
         return false;
     }
-    let normalized = strip_genitive(lower);
-    if is_excluded_non_role(normalized) {
-        return false;
+    // 1. Snabbaste vägen: pröva ordet direkt en gång (O(1) HashSet + sista-byte-index)
+    if is_role_base_or_compound(lower) {
+        return true;
     }
-    is_role_base_or_compound(normalized)
+    // 2. Pröva genitiv-strippning (`:s` eller enkelt `-s`) bara om ordet faktiskt slutar på `s`
+    if let Some(stem) = lower.strip_suffix(":s") {
+        return stem.chars().count() >= 2 && is_role_base_or_compound(stem);
+    }
+    if let Some(stem) = lower.strip_suffix('s') {
+        return !stem.ends_with('s') && is_role_base_or_compound(stem);
+    }
+    false
 }
+
+struct RoleIndex {
+    excluded_exact: HashSet<&'static str>,
+    excluded_by_last_byte: [Vec<&'static str>; 256],
+    standalone_exact: HashSet<&'static str>,
+    standalone_by_last_byte: [Vec<&'static str>; 256],
+}
+
+static ROLE_INDEX: LazyLock<RoleIndex> = LazyLock::new(|| {
+    const EXCLUDED_EXACT: &[&str] = &[
+        "tekniker",
+        "teknikerna",
+        "ledare",
+        "ledaren",
+        "ledarna",
+        "ombud",
+        "ombudet",
+        "ombuden",
+        "ansvarig",
+        "ansvarige",
+        "ansvariga",
+        "förare",
+        "föraren",
+        "förarna",
+        "mästare",
+        "mästaren",
+        "mästarna",
+        "värd",
+        "värden",
+        "värdar",
+        "värdarna",
+        "polis",
+        "polisen",
+        "poliser",
+        "poliserna",
+    ];
+    let excluded_exact: HashSet<&'static str> = EXCLUDED_EXACT.iter().copied().collect();
+    let mut excluded_by_last_byte: [Vec<&'static str>; 256] = std::array::from_fn(|_| Vec::new());
+    for &suf in EXCLUDED_ENDINGS {
+        if let Some(&b) = suf.as_bytes().last() {
+            excluded_by_last_byte[b as usize].push(suf);
+        }
+    }
+
+    let mut standalone_exact: HashSet<&'static str> =
+        STANDALONE_AND_COMPOUND_FORMS.iter().copied().collect();
+    for &w in EXACT_IRREGULAR_ROLES {
+        standalone_exact.insert(w);
+    }
+    let mut standalone_by_last_byte: [Vec<&'static str>; 256] =
+        std::array::from_fn(|_| Vec::new());
+    for &suf in STANDALONE_AND_COMPOUND_FORMS {
+        if let Some(&b) = suf.as_bytes().last() {
+            standalone_by_last_byte[b as usize].push(suf);
+        }
+    }
+
+    RoleIndex {
+        excluded_exact,
+        excluded_by_last_byte,
+        standalone_exact,
+        standalone_by_last_byte,
+    }
+});
 
 /// Filtrerar bort vanliga icke-befattningar och falska vänner som råkar dela ändelse med yrkesord.
 fn is_excluded_non_role(w: &str) -> bool {
-    // Exakta stoppord (inkl. "tekniker" i obestämd plural som nästan alltid avser metoder/tekniker)
-    if matches!(
-        w,
-        "tekniker"
-            | "teknikerna"
-            | "ledare"
-            | "ledaren"
-            | "ledarna"
-            | "ombud"
-            | "ombudet"
-            | "ombuden"
-            | "ansvarig"
-            | "ansvarige"
-            | "ansvariga"
-            | "förare"
-            | "föraren"
-            | "förarna"
-            | "mästare"
-            | "mästaren"
-            | "mästarna"
-            | "värd"
-            | "värden"
-            | "värdar"
-            | "värdarna"
-            | "polis"
-            | "polisen"
-            | "poliser"
-            | "poliserna"
-    ) {
+    let idx = &*ROLE_INDEX;
+    if idx.excluded_exact.contains(w) {
         return true;
     }
+    let Some(&last_b) = w.as_bytes().last() else {
+        return false;
+    };
+    idx.excluded_by_last_byte[last_b as usize]
+        .iter()
+        .any(|suf| w.ends_with(suf))
+}
 
-    // Ändelser som utgör fysikaliska/tekniska begrepp, juridiska rollbegrepp (GDPR PuA) eller allmänna gruppord
-    const EXCLUDED_ENDINGS: &[&str] = &[
+const EXCLUDED_ENDINGS: &[&str] = &[
         // Falska vänner på -lektor / -rektor
         "reflektor",
         "reflektorn",
@@ -585,80 +637,68 @@ fn is_excluded_non_role(w: &str) -> bool {
         "brukarna",
     ];
 
-    EXCLUDED_ENDINGS.iter().any(|suf| w.ends_with(suf))
-}
+const EXACT_IRREGULAR_ROLES: &[&str] = &[
+    "vd",
+    "vd:n",
+    "ciso",
+    "ciso:n",
+    "cio",
+    "cfo",
+    "cto",
+    "teknikern",
+    "vårdbiträde",
+    "vårdbiträdet",
+    "vårdbiträden",
+    "vårdbiträdena",
+    "nämndeman",
+    "nämndemannen",
+    "nämndemän",
+    "nämndemännen",
+    "brandman",
+    "brandmannen",
+    "brandmän",
+    "brandmännen",
+    "polisman",
+    "polismannen",
+    "polismän",
+    "polismännen",
+    "rådman",
+    "rådmannen",
+    "rådmän",
+    "rådmännen",
+    "lagman",
+    "lagmannen",
+    "lagmän",
+    "lagmännen",
+    "landshövding",
+    "landshövdingen",
+    "landshövdingar",
+    "landshövdingarna",
+    "kyrkoherde",
+    "kyrkoherden",
+    "kyrkoherdar",
+    "kyrkoherdarna",
+    "diakon",
+    "diakonen",
+    "diakoner",
+    "diakonerna",
+    "präst",
+    "prästen",
+    "präster",
+    "prästerna",
+    "imam",
+    "imamen",
+    "imamer",
+    "imamerna",
+    "flygvärdinna",
+    "flygvärdinnan",
+    "flygvärdinnor",
+    "flygvärdinnorna",
+];
 
-fn is_role_base_or_compound(w: &str) -> bool {
-    if is_excluded_non_role(w) {
-        return false;
-    }
-
-    // 1. Korta akronymer / oregelbundna befattningsord (exakt matchning)
-    if matches!(
-        w,
-        "vd"
-            | "vd:n"
-            | "ciso"
-            | "ciso:n"
-            | "cio"
-            | "cfo"
-            | "cto"
-            | "teknikern"
-            | "vårdbiträde"
-            | "vårdbiträdet"
-            | "vårdbiträden"
-            | "vårdbiträdena"
-            | "nämndeman"
-            | "nämndemannen"
-            | "nämndemän"
-            | "nämndemännen"
-            | "brandman"
-            | "brandmannen"
-            | "brandmän"
-            | "brandmännen"
-            | "polisman"
-            | "polismannen"
-            | "polismän"
-            | "polismännen"
-            | "rådman"
-            | "rådmannen"
-            | "rådmän"
-            | "rådmännen"
-            | "lagman"
-            | "lagmannen"
-            | "lagmän"
-            | "lagmännen"
-            | "landshövding"
-            | "landshövdingen"
-            | "landshövdingar"
-            | "landshövdingarna"
-            | "kyrkoherde"
-            | "kyrkoherden"
-            | "kyrkoherdar"
-            | "kyrkoherdarna"
-            | "diakon"
-            | "diakonen"
-            | "diakoner"
-            | "diakonerna"
-            | "präst"
-            | "prästen"
-            | "präster"
-            | "prästerna"
-            | "imam"
-            | "imamen"
-            | "imamer"
-            | "imamerna"
-            | "flygvärdinna"
-            | "flygvärdinnan"
-            | "flygvärdinnor"
-            | "flygvärdinnorna"
-    ) {
-        return true;
-    }
-
-    // 2. Produktiva befattningsefterled som gäller BÅDE fristående och som sammansättning
-    //    (kräver antingen exakt träff eller minst 2 teckens förled vid sammansättning, t.ex. "it-chef", "överläkare")
-    const STANDALONE_AND_COMPOUND_FORMS: &[&str] = &[
+// Produktiva befattningsefterled som gäller BÅDE fristående och som sammansättning
+// (kräver antingen exakt träff eller minst 2 teckens förled vid sammansättning, t.ex. "it-chef", "överläkare")
+const STANDALONE_AND_COMPOUND_FORMS: &[&str] = &[
         // Ledning & styrning
         "chef",
         "chefen",
@@ -1130,13 +1170,25 @@ fn is_role_base_or_compound(w: &str) -> bool {
         "statsråden",
     ];
 
-    for suf in STANDALONE_AND_COMPOUND_FORMS {
-        if w == *suf {
-            return true;
-        }
-        if let Some(prefix) = w.strip_suffix(suf) {
-            if valid_compound_prefix(prefix, 2) {
-                return true;
+fn is_role_base_or_compound(w: &str) -> bool {
+    if is_excluded_non_role(w) {
+        return false;
+    }
+
+    let idx = &*ROLE_INDEX;
+
+    // 1. O(1) exakt träff (akronymer, oregelbundna yrken och grundformer)
+    if idx.standalone_exact.contains(w) {
+        return true;
+    }
+
+    // 2. Sista-byte-indexerad sammansättningskontroll på produktiva befattningsefterled
+    if let Some(&last_b) = w.as_bytes().last() {
+        for &suf in &idx.standalone_by_last_byte[last_b as usize] {
+            if let Some(prefix) = w.strip_suffix(suf) {
+                if valid_compound_prefix(prefix, 2) {
+                    return true;
+                }
             }
         }
     }

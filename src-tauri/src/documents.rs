@@ -155,19 +155,23 @@ fn extract_docx_text(bytes: &[u8]) -> Result<(String, usize), String> {
                 || name.starts_with("word/footer")
                 || name == "word/footnotes.xml"
                 || name == "word/endnotes.xml"
+                || name == "word/comments.xml"
             {
                 xml_parts.push(name);
             }
         }
     }
 
-    // Sortera så att header kommer först, sedan document.xml, sedan footnotes/footer
+    // Sortera så att header kommer först, sedan document.xml, sedan footnotes/comments/footer
     xml_parts.sort_by_key(|name| {
         if name.starts_with("word/header") {
             0
         } else if name == "word/document.xml" {
             1
-        } else if name == "word/footnotes.xml" || name == "word/endnotes.xml" {
+        } else if name == "word/footnotes.xml"
+            || name == "word/endnotes.xml"
+            || name == "word/comments.xml"
+        {
             2
         } else {
             3
@@ -315,7 +319,8 @@ pub fn export_masked_docx_bytes(
                 || name.starts_with("word/header")
                 || name.starts_with("word/footer")
                 || name == "word/footnotes.xml"
-                || name == "word/endnotes.xml";
+                || name == "word/endnotes.xml"
+                || name == "word/comments.xml";
 
             if is_word_xml {
                 let mut xml_str = String::new();
@@ -345,6 +350,44 @@ pub fn export_masked_docx_bytes(
     Ok(out_buf)
 }
 
+/// Ersätter alla angivna par i ett enda vänster-till-höger-svep (längsta match först),
+/// så att redan insatta platshållare eller återställda namn aldrig dubbelersätts av senare regler.
+fn apply_replacements_single_pass(input: &str, sorted_reps: &[&ReplacementPair]) -> String {
+    if input.is_empty() || sorted_reps.is_empty() {
+        return input.to_string();
+    }
+
+    // Snabbväg: om inget nyckelord ens förekommer i strängen, hoppa över svepet
+    if !sorted_reps.iter().any(|r| input.contains(&r.original)) {
+        return input.to_string();
+    }
+
+    let mut out = String::with_capacity(input.len());
+    let mut pos = 0usize;
+    let len = input.len();
+
+    while pos < len {
+        let rest = &input[pos..];
+        let mut matched: Option<&ReplacementPair> = None;
+        for rep in sorted_reps {
+            if rest.starts_with(&rep.original) {
+                matched = Some(rep);
+                break;
+            }
+        }
+        if let Some(rep) = matched {
+            out.push_str(&rep.replacement);
+            pos += rep.original.len();
+        } else {
+            let ch = rest.chars().next().unwrap();
+            out.push(ch);
+            pos += ch.len_utf8();
+        }
+    }
+
+    out
+}
+
 fn replace_text_in_word_xml(
     xml: &str,
     replacements: &[&ReplacementPair],
@@ -372,7 +415,8 @@ fn replace_text_in_container_xml(
         let mut container_idx = 0usize;
         let mut in_container = false;
         let mut in_text = false;
-        let mut texts_in_container: Vec<String> = Vec::new();
+        let mut raw_texts_in_container: Vec<String> = Vec::new();
+        let mut single_replaced_in_container: Vec<String> = Vec::new();
 
         loop {
             match reader.read_event() {
@@ -380,7 +424,8 @@ fn replace_text_in_container_xml(
                     let local = e.local_name();
                     if local.as_ref() == container_local_name {
                         in_container = true;
-                        texts_in_container.clear();
+                        raw_texts_in_container.clear();
+                        single_replaced_in_container.clear();
                     } else if in_container && local.as_ref() == text_local_name {
                         in_text = true;
                     }
@@ -388,13 +433,10 @@ fn replace_text_in_container_xml(
                 Ok(Event::Text(e)) => {
                     if in_container && in_text {
                         let unescaped = e.unescape().map_err(|e| e.to_string())?;
-                        let mut single = unescaped.into_owned();
-                        for rep in replacements {
-                            if single.contains(&rep.original) {
-                                single = single.replace(&rep.original, &rep.replacement);
-                            }
-                        }
-                        texts_in_container.push(single);
+                        let raw = unescaped.into_owned();
+                        let single = apply_replacements_single_pass(&raw, replacements);
+                        raw_texts_in_container.push(raw);
+                        single_replaced_in_container.push(single);
                     }
                 }
                 Ok(Event::End(e)) => {
@@ -403,17 +445,14 @@ fn replace_text_in_container_xml(
                         in_text = false;
                     } else if local.as_ref() == container_local_name && in_container {
                         in_container = false;
-                        if texts_in_container.len() > 1 {
-                            let combined = texts_in_container.join("");
-                            let mut replaced = combined.clone();
-                            for rep in replacements {
-                                if replaced.contains(&rep.original) {
-                                    replaced = replaced.replace(&rep.original, &rep.replacement);
-                                }
-                            }
-                            if replaced != combined {
+                        if raw_texts_in_container.len() > 1 {
+                            let combined_raw = raw_texts_in_container.join("");
+                            let combined_single = single_replaced_in_container.join("");
+                            let combined_replaced =
+                                apply_replacements_single_pass(&combined_raw, replacements);
+                            if combined_replaced != combined_single {
                                 split_containers.insert(container_idx);
-                                consolidated_texts.insert(container_idx, replaced);
+                                consolidated_texts.insert(container_idx, combined_replaced);
                             }
                         }
                         container_idx += 1;
@@ -434,7 +473,7 @@ fn replace_text_in_container_xml(
     let mut container_idx = 0usize;
     let mut in_container = false;
     let mut in_wt = false;
-    let mut wt_index_in_container = 0usize;
+    let mut wrote_consolidated = false;
 
     loop {
         match reader.read_event() {
@@ -442,7 +481,7 @@ fn replace_text_in_container_xml(
                 let local = e.local_name();
                 if local.as_ref() == container_local_name {
                     in_container = true;
-                    wt_index_in_container = 0;
+                    wrote_consolidated = false;
                 }
                 if local.as_ref() == text_local_name {
                     in_wt = true;
@@ -470,21 +509,18 @@ fn replace_text_in_container_xml(
             Ok(Event::Text(e)) => {
                 if in_wt {
                     if in_container && split_containers.contains(&container_idx) {
-                        if wt_index_in_container == 0 {
+                        if !wrote_consolidated {
                             if let Some(cons) = consolidated_texts.get(&container_idx) {
                                 writer
                                     .write_event(Event::Text(BytesText::new(cons)))
                                     .map_err(|e| e.to_string())?;
+                                wrote_consolidated = true;
                             }
                         }
                     } else {
                         let unescaped = e.unescape().map_err(|e| e.to_string())?;
-                        let mut modified = unescaped.into_owned();
-                        for rep in replacements {
-                            if modified.contains(&rep.original) {
-                                modified = modified.replace(&rep.original, &rep.replacement);
-                            }
-                        }
+                        let modified =
+                            apply_replacements_single_pass(unescaped.as_ref(), replacements);
                         writer
                             .write_event(Event::Text(BytesText::new(&modified)))
                             .map_err(|e| e.to_string())?;
@@ -499,7 +535,6 @@ fn replace_text_in_container_xml(
                 let local = e.local_name();
                 if local.as_ref() == text_local_name {
                     in_wt = false;
-                    wt_index_in_container += 1;
                 } else if local.as_ref() == container_local_name && in_container {
                     in_container = false;
                     container_idx += 1;
@@ -858,5 +893,47 @@ mod tests {
 
         let reimported = import_document_bytes("split.docx", &masked).expect("reimport split docx");
         assert_eq!(reimported.text, "Ansvarig läkare: [PERSON A]");
+    }
+
+    #[test]
+    fn masks_split_runs_after_empty_wt_and_avoids_double_replacement() {
+        let mut buf = Vec::new();
+        {
+            let cursor = Cursor::new(&mut buf);
+            let mut zip = ZipWriter::new(cursor);
+            let options = SimpleFileOptions::default();
+            zip.start_file("word/document.xml", options).unwrap();
+            // Tom <w:t></w:t> före delade runs får inte sluka stycket, och [PERSON A] får inte dubbelersättas av "PERSON"
+            let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+<w:p><w:r><w:t></w:t></w:r><w:r><w:t>Anders </w:t></w:r><w:r><w:t>Andersson</w:t></w:r></w:p>
+</w:body></w:document>"#;
+            zip.write_all(xml.as_bytes()).unwrap();
+            zip.start_file("word/comments.xml", options).unwrap();
+            let comments_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:comment w:id="0"><w:p><w:r><w:t>Granskat av Anders Andersson</w:t></w:r></w:p></w:comment>
+</w:comments>"#;
+            zip.write_all(comments_xml.as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+
+        let masked = export_masked_docx_bytes(
+            &buf,
+            &[
+                ReplacementPair {
+                    original: "Anders Andersson".into(),
+                    replacement: "[PERSON A]".into(),
+                },
+                ReplacementPair {
+                    original: "PERSON".into(),
+                    replacement: "[ORD 1]".into(),
+                },
+            ],
+        )
+        .expect("mask docx with empty wt and comments");
+
+        let reimported = import_document_bytes("empty_wt.docx", &masked).expect("reimport");
+        assert_eq!(reimported.text, "[PERSON A]\n\nGranskat av [PERSON A]");
     }
 }

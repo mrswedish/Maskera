@@ -342,8 +342,7 @@ fn extract_document_headings(text: &str, max_headings: usize) -> Vec<String> {
             trimmed.ends_with('.') || trimmed.ends_with('!') || trimmed.ends_with('?');
         let looks_like_heading = trimmed.starts_with('#')
             || (word_count <= 8
-                && char_len >= 3
-                && char_len <= 68
+                && (3..=68).contains(&char_len)
                 && !ends_with_sentence_punct
                 && trimmed
                     .chars()
@@ -714,12 +713,6 @@ pub fn apply_judge_to_report(
 
     // Om Lager 4 sänker RÖD -> GUL/GRÖN (och inga skarpa Lager 1-ankare finns), nedgradera falska röda styckesträffar
     if final_level != "red" && (layer3_level == "red" || raw.downgrade_red_sections) {
-        let downgraded_target = if final_level == "green" {
-            "yellow"
-        } else {
-            "yellow"
-        };
-
         if final_level == "green" {
             // Vid helt grön helhetsbedömning tas falska semantiska utslag bort så att rapporten inte motsäger sig själv
             report.section_findings.clear();
@@ -727,7 +720,7 @@ pub fn apply_judge_to_report(
         } else {
             for f in &mut report.section_findings {
                 if f.level == "red" {
-                    f.level = downgraded_target.to_string();
+                    f.level = "yellow".to_string();
                     if !f.category.starts_with("Helhetsbedömd som Gul") {
                         f.category = format!("Helhetsbedömd som Gul — {}", f.category);
                     }
